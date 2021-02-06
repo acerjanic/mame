@@ -271,10 +271,14 @@ std::unique_ptr<util::disasm_interface> r4000_base_device::create_disassembler()
 
 void r4000_base_device::execute_run()
 {
+	u32 op;
+	u64 pcCopy;
+	translate_result t;
 	while (m_icount-- > 0)
 	{
 		debugger_instruction_hook(m_pc);
-
+		pcCopy = m_pc;
+		/*
 		fetch(m_pc,
 			[this](u32 const op)
 			{
@@ -287,7 +291,53 @@ void r4000_base_device::execute_run()
 				// zero register zero
 				m_r[0] = 0;
 			});
+		*/
+		
+		// alignment error
+		if (pcCopy & 3)
+		{
+			address_error(TRANSLATE_FETCH, pcCopy);
+			goto updatePCandBranchState;
+			//return false;
+		}
 
+		t = translate(TRANSLATE_FETCH, pcCopy);
+
+		// address error
+		if (t == ERROR)
+		{
+			address_error(TRANSLATE_FETCH, pcCopy);
+			goto updatePCandBranchState;
+			//return false;
+		}
+
+		// tlb miss
+		if (t == MISS)
+			goto updatePCandBranchState;
+			//return false;
+
+		op = space(0).read_dword(pcCopy);
+
+		if (m_bus_error)
+		{
+			m_bus_error = false;
+			cpu_exception(EXCEPTION_IBE);
+		}
+		else
+		{
+			// check interrupts
+			if ((CAUSE & SR & CAUSE_IP) && (SR & SR_IE) && !(SR & (SR_EXL | SR_ERL)))
+				cpu_exception(EXCEPTION_INT);
+			else
+				cpu_execute(op);
+
+			// zero register zero
+			m_r[0] = 0;
+		}
+		
+
+		
+		updatePCandBranchState:
 		// update pc and branch state
 		switch (m_branch_state)
 		{
@@ -1163,7 +1213,7 @@ void r5000_device::handle_reserved_instruction(u32 const op)
 	r4000_base_device::handle_reserved_instruction(op);
 }
 
-void r4000_base_device::cpu_exception(u32 exception, u16 const vector)
+inline void r4000_base_device::cpu_exception(u32 exception, u16 const vector)
 {
 	if (exception != EXCEPTION_INT)
 		LOGMASKED(LOG_EXCEPTION, "exception 0x%08x\n", exception);
