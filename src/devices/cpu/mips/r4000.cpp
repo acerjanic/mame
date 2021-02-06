@@ -780,6 +780,7 @@ void r4000_base_device::execute_run()
 							m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
 							m_branch_state = DELAY;
 							m_pc += 4;
+							m_r[0] = 0;
 							continue;
 						}
 						break;
@@ -790,6 +791,7 @@ void r4000_base_device::execute_run()
 							m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
 							m_branch_state = DELAY;
 							m_pc += 4;
+							m_r[0] = 0;
 							continue;
 						}
 						break;
@@ -800,12 +802,14 @@ void r4000_base_device::execute_run()
 							m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
 							m_branch_state = DELAY;
 							m_pc += 4;
+							m_r[0] = 0;
 							continue;
 						}
 						else {
 							//m_branch_state = NULLIFY;
 							m_branch_state = NONE;
 							m_pc += 8;
+							m_r[0] = 0;
 							continue;
 						}
 						break;
@@ -816,12 +820,14 @@ void r4000_base_device::execute_run()
 							m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
 							m_branch_state = DELAY;
 							m_pc += 4;
+							m_r[0] = 0;
 							continue;
 						}
 						else {
 							//m_branch_state = NULLIFY;
 							m_branch_state = NONE;
 							m_pc += 8;
+							m_r[0] = 0;
 							continue;
 						}
 						break;
@@ -830,29 +836,59 @@ void r4000_base_device::execute_run()
 					//case 0x06: // *
 					//case 0x07: // *
 					case 0x08: // TGEI
-						if (s64(m_r[RSREG]) >= s16(op))
+						if (s64(m_r[RSREG]) >= s16(op)) {
 							cpu_exception(EXCEPTION_TR);
+							m_branch_state = NONE;
+							// zero register zero
+							m_r[0] = 0;
+							continue;
+						}
 						break;
 					case 0x09: // TGEIU
-						if (m_r[RSREG] >= u64(s64(s16(op))))
+						if (m_r[RSREG] >= u64(s64(s16(op)))) {
 							cpu_exception(EXCEPTION_TR);
+							m_branch_state = NONE;
+							// zero register zero
+							m_r[0] = 0;
+							continue;
+						}
 						break;
 					case 0x0a: // TLTI
-						if (s64(m_r[RSREG]) < s16(op))
+						if (s64(m_r[RSREG]) < s16(op)) {
 							cpu_exception(EXCEPTION_TR);
+							m_branch_state = NONE;
+							// zero register zero
+							m_r[0] = 0;
+							continue;
+						}
 						break;
 					case 0x0b: // TLTIU
-						if (m_r[RSREG] >= u64(s64(s16(op))))
+						if (m_r[RSREG] >= u64(s64(s16(op)))) {
 							cpu_exception(EXCEPTION_TR);
+							m_branch_state = NONE;
+							// zero register zero
+							m_r[0] = 0;
+							continue;
+						}
 						break;
 					case 0x0c: // TEQI
-						if (m_r[RSREG] == u64(s64(s16(op))))
+						if (m_r[RSREG] == u64(s64(s16(op)))) {
 							cpu_exception(EXCEPTION_TR);
+							m_branch_state = NONE;
+							// zero register zero
+							m_r[0] = 0;
+							continue;
+						}
 						break;
 					//case 0x0d: // *
 					case 0x0e: // TNEI
-						if (m_r[RSREG] != u64(s64(s16(op))))
+						if (m_r[RSREG] != u64(s64(s16(op)))) {
 							cpu_exception(EXCEPTION_TR);
+							m_branch_state = NONE;
+							// zero register zero
+							m_r[0] = 0;
+							continue;	
+						}
 						break;
 					//case 0x0f: // *
 					case 0x10: // BLTZAL
