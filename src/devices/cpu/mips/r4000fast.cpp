@@ -28,7 +28,7 @@
 
 #include "emu.h"
 #include "debugger.h"
-#include "r4000.h"
+#include "r4000fast.h"
 #include "mips3dsm.h"
 #include "unicode.h"
 
@@ -56,6 +56,33 @@
 	#define SYSCALL_IRIX53 (0)
 	#define SYSCALL_WINNT4 (0)
 #endif
+
+#define INC_PC() 	switch (m_branch_state) 		\
+					{ 								\
+						case NONE:					\
+							m_pc += 4;				\
+							break;					\
+													\
+						case DELAY:					\
+							m_branch_state = NONE;	\
+							m_pc = m_branch_target;	\
+							break;					\
+													\
+						case BRANCH:				\	
+							m_branch_state = DELAY;	\
+							m_pc += 4;				\	
+							break;					\
+													\
+						case EXCEPTION:				\	
+							m_branch_state = NONE;	\
+							break;					\
+													\
+						case NULLIFY:				\	
+							m_branch_state = NONE;	\
+							m_pc += 8;				\
+							break;					\
+					}								\
+
 
 // operating system specific system call logging
 //#define SYSCALL_IRIX53 (1U << 0)
@@ -96,15 +123,15 @@
 #define SR         m_cp0[CP0_Status]
 #define CAUSE      m_cp0[CP0_Cause]
 
-DEFINE_DEVICE_TYPE(R4000, r4000_device, "r4000", "MIPS R4000")
-DEFINE_DEVICE_TYPE(R4400, r4400_device, "r4400", "MIPS R4400")
-DEFINE_DEVICE_TYPE(R4600, r4600_device, "r4600", "QED R4600")
-DEFINE_DEVICE_TYPE(R5000, r5000_device, "r5000", "MIPS R5000")
+DEFINE_DEVICE_TYPE(R4000, r4000_device_fast, "r4000", "MIPS R4000")
+DEFINE_DEVICE_TYPE(R4400, r4400_device_fast, "r4400", "MIPS R4400")
+DEFINE_DEVICE_TYPE(R4600, r4600_device_fast, "r4600", "QED R4600")
+DEFINE_DEVICE_TYPE(R5000, r5000_device_fast, "r5000", "MIPS R5000")
 
-u32 const r5000_device::s_fcc_masks[8] = { (1U << 23), (1U << 25), (1U << 26), (1U << 27), (1U << 28), (1U << 29), (1U << 30), (1U << 31) };
-u32 const r5000_device::s_fcc_shifts[8] = { 23, 25, 26, 27, 28, 29, 30, 31 };
+u32 const r5000_device_fast::s_fcc_masks[8] = { (1U << 23), (1U << 25), (1U << 26), (1U << 27), (1U << 28), (1U << 29), (1U << 30), (1U << 31) };
+u32 const r5000_device_fast::s_fcc_shifts[8] = { 23, 25, 26, 27, 28, 29, 30, 31 };
 
-r4000_base_device::r4000_base_device(machine_config const &mconfig, device_type type, char const *tag, device_t *owner, u32 clock, u32 prid, u32 fcr, cache_size icache_size, cache_size dcache_size)
+r4000_base_device_fast::r4000_base_device_fast(machine_config const &mconfig, device_type type, char const *tag, device_t *owner, u32 clock, u32 prid, u32 fcr, cache_size icache_size, cache_size dcache_size)
 	: cpu_device(mconfig, type, tag, owner, clock)
 	, m_program_config_le("program", ENDIANNESS_LITTLE, 64, 32)
 	, m_program_config_be("program", ENDIANNESS_BIG, 64, 32)
@@ -119,7 +146,7 @@ r4000_base_device::r4000_base_device(machine_config const &mconfig, device_type 
 	m_cp0[CP0_Config] = CONFIG_BE | (icache_size << 9) | (dcache_size << 6);
 }
 
-void r4000_base_device::device_start()
+void r4000_base_device_fast::device_start()
 {
 	// TODO: save state
 
@@ -199,7 +226,7 @@ void r4000_base_device::device_start()
 
 	m_hard_reset = true;
 
-	m_cp0_timer = machine().scheduler().timer_alloc(timer_expired_delegate(FUNC(r4000_base_device::cp0_timer_callback), this));
+	m_cp0_timer = machine().scheduler().timer_alloc(timer_expired_delegate(FUNC(r4000_base_device_fast::cp0_timer_callback), this));
 
 	// compute icache line selection mask and allocate tag and data
 	unsigned const config_ic = (m_cp0[CP0_Config] & CONFIG_IC) >> 9;
@@ -209,7 +236,7 @@ void r4000_base_device::device_start()
 	m_icache_data = std::make_unique<u32 []>((0x1000U << config_ic) >> 2);
 }
 
-void r4000_base_device::device_reset()
+void r4000_base_device_fast::device_reset()
 {
 	if (!m_hard_reset)
 	{
@@ -253,7 +280,7 @@ void r4000_base_device::device_reset()
 	m_icache_misses = 0;
 }
 
-void r4000_base_device::device_stop()
+void r4000_base_device_fast::device_stop()
 {
 	if ((m_icache_hits + m_icache_misses) > 0)
 		LOGMASKED(LOG_STATS, "icache hit ratio %.3f%% (%d hits %d misses)\n",
@@ -263,14 +290,14 @@ void r4000_base_device::device_stop()
 		LOGMASKED(LOG_STATS, "tlb scans %d loops %d average %.3f loops per scan\n", m_tlb_scans, m_tlb_loops, double(m_tlb_loops) / double(m_tlb_scans));
 }
 
-device_memory_interface::space_config_vector r4000_base_device::memory_space_config() const
+device_memory_interface::space_config_vector r4000_base_device_fast::memory_space_config() const
 {
 	return space_config_vector{
 		std::make_pair(AS_PROGRAM, R4000_ENDIAN_LE_BE(&m_program_config_le, &m_program_config_be))
 	};
 }
 
-bool r4000_base_device::memory_translate(int spacenum, int intention, offs_t &address)
+bool r4000_base_device_fast::memory_translate(int spacenum, int intention, offs_t &address)
 {
 	// FIXME: address truncation
 	u64 placeholder = s32(address);
@@ -284,12 +311,12 @@ bool r4000_base_device::memory_translate(int spacenum, int intention, offs_t &ad
 	return true;
 }
 
-std::unique_ptr<util::disasm_interface> r4000_base_device::create_disassembler()
+std::unique_ptr<util::disasm_interface> r4000_base_device_fast::create_disassembler()
 {
 	return std::make_unique<mips3_disassembler>();
 }
 
-void r4000_base_device::execute_run()
+void r4000_base_device_fast::execute_run()
 {
 	u32 op;
 	u64 pcCopy;
@@ -297,6 +324,39 @@ void r4000_base_device::execute_run()
 	u64 product;
 	u64 sum;
 	u64 difference;
+
+	//Manual Jump Table
+	void * opcode_table[] = { 
+		&&OPCODE_SPECIAL, &&OPCODE_REGIMM, &&OPCODE_J, &&OPCODE_JAL, &&OPCODE_BEQ,
+		&&OPCODE_BNE, &&OPCODE_BLEZ, &&OPCODE_BGTZ, &&OPCODE_ADDI, &&OPCODE_ADDIU, &&OPCODE_SLTI,
+		&&OPCODE_SLTIU, &&OPCODE_ANDI, &&OPCODE_ORI, &&OPCODE_XORI, &&OPCODE_LUI, &&OPCODE_COP0,
+		&&OPCODE_COP1, &&OPCODE_COP2, &&OPCODE_COP1X, &&OPCODE_BEQL, &&OPCODE_BNEL, &&OPCODE_BGTZL,
+		&&OPCODE_DADDI, &&OPCODE_DADDIU, &&OPCODE_LDL, &&OPCODE_LDR, &&OPCODE_RESERVED, &&OPCODE_RESERVED, 
+		&&OPCODE_RESERVED, &&OPCODE_RESERVED, &&OPCODE_LB, &&OPCODE_LH,
+		&&OPCODE_LWL, &&OPCODE_LW, &&OPCODE_LBU, &&OPCODE_LHU, &&OPCODE_LWR, &&OPCODE_LWU,
+		&&OPCODE_SB, &&OPCODE_SH, &&OPCODE_SWL, &&OPCODE_SW, &&OPCODE_SDL, &&OPCODE_SDR, &&OPCODE_SWR,
+		&&OPCODE_CACHE, &&OPCODE_LL, &&OPCODE_LWC1, &&OPCODE_LWC2, &&OPCODE_LLD, &&OPCODE_LDC1,
+		&&OPCODE_LD, &&OPCODE_SC, &&OPCODE_SCD, &&OPCODE_SDC1, &&OPCODE_SDC2, &&OPCODE_SD
+	};
+
+	//Manual Jump Table
+	void * opcode_special_table[] = { 
+		&&SPCODE_SLL, &&SPCODE_RESERVED, &&SPCODE_SRL, &&SPCODE_SRA, &&SPCODE_SLLV, 
+		&&SPCODE_RESERVED, &&SPCODE_SRLV, &&SPCODE_SRAV, &&SPCODE_JR, &&SPCODE_JALR, 
+		&&SPCODE_RESERVED, &&SPCODE_RESERVED, &&SPCODE_SYSCALL, &&SPCODE_BREAK, 
+		&&SPCODE_RESERVED, &&SPCODE_SYNC, &&SPCODE_MFHI, &&SPCODE_MTHI, &&SPCODE_MFLO, 
+		&&SPCODE_MTLO, &&SPCODE_DSLLV, &&SPCODE_RESERVED, &&SPCODE_DSRLV, &&SPCODE_DSRAV, 
+		&&SPCODE_MULT, &&SPCODE_MULTU, &&SPCODE_DIV, &&SPCODE_DIVU, &&SPCODE_DMULT, 
+		&&SPCODE_DMULTU, &&SPCODE_DDIV, &&SPCODE_DDIVU, &&SPCODE_ADD, &&SPCODE_ADDU, 
+		&&SPCODE_SUB, &&SPCODE_SUBU, &&SPCODE_AND, &&SPCODE_OR, &&SPCODE_XOR, &&SPCODE_NOR, 
+		&&SPCODE_RESERVED, &&SPCODE_RESERVED, &&SPCODE_SLT, &&SPCODE_SLTU, &&SPCODE_DADD, 
+		&&SPCODE_DADDU, &&SPCODE_DSUB, &&SPCODE_DSUBU, &&SPCODE_TGE, &&SPCODE_TGEU, 
+		&&SPCODE_TLT, &&SPCODE_TLTU, &&SPCODE_TEQ, &&SPCODE_RESERVED, &&SPCODE_TNE, 
+		&&SPCODE_DSLL, &&SPCODE_RESERVED, &&SPCODE_DSRL, &&SPCODE_DSRA, &&SPCODE_DSLL32, 
+		&&SPCODE_RESERVED, &&SPCODE_DSRL32, &&SPCODE_DSRA32
+	};
+	
+
 	while (m_icount-- > 0)
 	{
 		debugger_instruction_hook(m_pc);
@@ -1502,7 +1562,7 @@ void r4000_base_device::execute_run()
 	}
 }
 
-void r4000_base_device::execute_set_input(int inputnum, int state)
+void r4000_base_device_fast::execute_set_input(int inputnum, int state)
 {
 	if (state)
 		m_cp0[CP0_Cause] |= (CAUSE_IPEX0 << inputnum);
@@ -1511,7 +1571,7 @@ void r4000_base_device::execute_set_input(int inputnum, int state)
 }
 
 /*
-void r4000_base_device::cpu_execute(u32 const op)
+void r4000_base_device_fast::cpu_execute(u32 const op)
 {
 	switch (op >> 26)
 	{
@@ -2311,7 +2371,7 @@ void r4000_base_device::cpu_execute(u32 const op)
 }
 */
 
-void r4000_base_device::handle_reserved_instruction(u32 const op)
+void r4000_base_device_fast::handle_reserved_instruction(u32 const op)
 {
 	// Unhandled operation codes cause reserved instruction
 	// exceptions in all current implementations and are
@@ -2319,7 +2379,7 @@ void r4000_base_device::handle_reserved_instruction(u32 const op)
 	cpu_exception(EXCEPTION_RI);
 }
 
-void r5000_device::handle_reserved_instruction(u32 const op)
+void r5000_device_fast::handle_reserved_instruction(u32 const op)
 {
 	switch (op >> 26)
 	{
@@ -2347,10 +2407,10 @@ void r5000_device::handle_reserved_instruction(u32 const op)
 		return;
 	}
 
-	r4000_base_device::handle_reserved_instruction(op);
+	r4000_base_device_fast::handle_reserved_instruction(op);
 }
 
-inline void r4000_base_device::cpu_exception(u32 exception, u16 const vector)
+inline void r4000_base_device_fast::cpu_exception(u32 exception, u16 const vector)
 {
 
 	if (!(SR & SR_EXL))
@@ -2380,7 +2440,7 @@ inline void r4000_base_device::cpu_exception(u32 exception, u16 const vector)
 	}
 }
 
-void r4000_base_device::cpu_lwl(u32 const op)
+void r4000_base_device_fast::cpu_lwl(u32 const op)
 {
 	u64 const offset = ADDR(m_r[RSREG], s16(op));
 	unsigned const shift = ((offset & 3) ^ R4000_ENDIAN_LE_BE(3, 0)) << 3;
@@ -2392,7 +2452,7 @@ void r4000_base_device::cpu_lwl(u32 const op)
 		});
 }
 
-void r4000_base_device::cpu_lwr(u32 const op)
+void r4000_base_device_fast::cpu_lwr(u32 const op)
 {
 	u64 const offset = ADDR(m_r[RSREG], s16(op));
 	unsigned const shift = ((offset & 0x3) ^ R4000_ENDIAN_LE_BE(0, 3)) << 3;
@@ -2404,7 +2464,7 @@ void r4000_base_device::cpu_lwr(u32 const op)
 		});
 }
 
-void r4000_base_device::cpu_swl(u32 const op)
+void r4000_base_device_fast::cpu_swl(u32 const op)
 {
 	u64 const offset = ADDR(m_r[RSREG], s16(op));
 	unsigned const shift = ((offset & 3) ^ R4000_ENDIAN_LE_BE(3, 0)) << 3;
@@ -2412,7 +2472,7 @@ void r4000_base_device::cpu_swl(u32 const op)
 	store<u32, false>(offset, u32(m_r[RTREG]) >> shift, ~u32(0) >> shift);
 }
 
-void r4000_base_device::cpu_swr(u32 const op)
+void r4000_base_device_fast::cpu_swr(u32 const op)
 {
 	u64 const offset = ADDR(m_r[RSREG], s16(op));
 	unsigned const shift = ((offset & 3) ^ R4000_ENDIAN_LE_BE(0, 3)) << 3;
@@ -2420,7 +2480,7 @@ void r4000_base_device::cpu_swr(u32 const op)
 	store<u32, false>(offset, u32(m_r[RTREG]) << shift, ~u32(0) << shift);
 }
 
-void r4000_base_device::cpu_ldl(u32 const op)
+void r4000_base_device_fast::cpu_ldl(u32 const op)
 {
 	u64 const offset = ADDR(m_r[RSREG], s16(op));
 	unsigned const shift = ((offset & 7) ^ R4000_ENDIAN_LE_BE(7, 0)) << 3;
@@ -2432,7 +2492,7 @@ void r4000_base_device::cpu_ldl(u32 const op)
 		});
 }
 
-void r4000_base_device::cpu_ldr(u32 const op)
+void r4000_base_device_fast::cpu_ldr(u32 const op)
 {
 	u64 const offset = ADDR(m_r[RSREG], s16(op));
 	unsigned const shift = ((offset & 7) ^ R4000_ENDIAN_LE_BE(0, 7)) << 3;
@@ -2444,7 +2504,7 @@ void r4000_base_device::cpu_ldr(u32 const op)
 		});
 }
 
-void r4000_base_device::cpu_sdl(u32 const op)
+void r4000_base_device_fast::cpu_sdl(u32 const op)
 {
 	u64 const offset = ADDR(m_r[RSREG], s16(op));
 	unsigned const shift = ((offset & 7) ^ R4000_ENDIAN_LE_BE(7, 0)) << 3;
@@ -2452,7 +2512,7 @@ void r4000_base_device::cpu_sdl(u32 const op)
 	store<u64, false>(offset, m_r[RTREG] >> shift, ~u64(0) >> shift);
 }
 
-void r4000_base_device::cpu_sdr(u32 const op)
+void r4000_base_device_fast::cpu_sdr(u32 const op)
 {
 	u64 const offset = ADDR(m_r[RSREG], s16(op));
 	unsigned const shift = ((offset & 7) ^ R4000_ENDIAN_LE_BE(0, 7)) << 3;
@@ -2460,7 +2520,7 @@ void r4000_base_device::cpu_sdr(u32 const op)
 	store<u64, false>(offset, m_r[RTREG] << shift, ~u64(0) << shift);
 }
 
-void r4000_base_device::cp0_execute(u32 const op)
+void r4000_base_device_fast::cp0_execute(u32 const op)
 {
 	if ((SR & SR_KSU) && !(SR & SR_CU0) && !(SR & (SR_EXL | SR_ERL)))
 	{
@@ -2581,7 +2641,7 @@ void r4000_base_device::cp0_execute(u32 const op)
 	}
 }
 
-u64 r4000_base_device::cp0_get(unsigned const reg)
+u64 r4000_base_device_fast::cp0_get(unsigned const reg)
 {
 	switch (reg)
 	{
@@ -2604,7 +2664,7 @@ u64 r4000_base_device::cp0_get(unsigned const reg)
 	}
 }
 
-void r4000_base_device::cp0_set(unsigned const reg, u64 const data)
+void r4000_base_device_fast::cp0_set(unsigned const reg, u64 const data)
 {
 	switch (reg)
 	{
@@ -2702,7 +2762,7 @@ void r4000_base_device::cp0_set(unsigned const reg, u64 const data)
 	}
 }
 
-void r4000_base_device::cp0_tlbr()
+void r4000_base_device_fast::cp0_tlbr()
 {
 	u8 const index = m_cp0[CP0_Index] & 0x3f;
 
@@ -2717,7 +2777,7 @@ void r4000_base_device::cp0_tlbr()
 	}
 }
 
-void r4000_base_device::cp0_tlbwi(u8 const index)
+void r4000_base_device_fast::cp0_tlbwi(u8 const index)
 {
 	if (index < ARRAY_LENGTH(m_tlb))
 	{
@@ -2741,7 +2801,7 @@ void r4000_base_device::cp0_tlbwi(u8 const index)
 	}
 }
 
-void r4000_base_device::cp0_tlbwr()
+void r4000_base_device_fast::cp0_tlbwr()
 {
 	u8 const wired = m_cp0[CP0_Wired] & 0x3f;
 	u8 const unwired = ARRAY_LENGTH(m_tlb) - wired;
@@ -2751,7 +2811,7 @@ void r4000_base_device::cp0_tlbwr()
 	cp0_tlbwi(index);
 }
 
-void r4000_base_device::cp0_tlbp()
+void r4000_base_device_fast::cp0_tlbp()
 {
 	m_cp0[CP0_Index] = 0x80000000;
 	for (u8 index = 0; index < ARRAY_LENGTH(m_tlb); index++)
@@ -2774,7 +2834,7 @@ void r4000_base_device::cp0_tlbp()
 		LOGMASKED(LOG_TLB, "tlbp hit 0x%08x index %02d (%s)\n", m_cp0[CP0_EntryHi], m_cp0[CP0_Index], machine().describe_context());
 }
 
-void r4000_base_device::cp0_update_timer(bool start)
+void r4000_base_device_fast::cp0_update_timer(bool start)
 {
 	if (start || m_cp0_timer->enabled())
 	{
@@ -2785,12 +2845,12 @@ void r4000_base_device::cp0_update_timer(bool start)
 	}
 }
 
-TIMER_CALLBACK_MEMBER(r4000_base_device::cp0_timer_callback)
+TIMER_CALLBACK_MEMBER(r4000_base_device_fast::cp0_timer_callback)
 {
 	m_cp0[CP0_Cause] |= CAUSE_IPEX5;
 }
 
-bool r4000_base_device::cp0_64() const
+bool r4000_base_device_fast::cp0_64() const
 {
 	switch (SR & (SR_KSU | SR_ERL | SR_EXL))
 	{
@@ -2802,14 +2862,14 @@ bool r4000_base_device::cp0_64() const
 	}
 }
 
-void r4000_base_device::cp1_unimplemented()
+void r4000_base_device_fast::cp1_unimplemented()
 {
 	m_fcr31 |= FCR31_CE;
 
 	cpu_exception(EXCEPTION_FPE);
 }
 
-template <> bool r4000_base_device::cp1_op<float32_t>(float32_t op)
+template <> bool r4000_base_device_fast::cp1_op<float32_t>(float32_t op)
 {
 	// detect denormalized or quiet NaN operand
 	if ((!(op.v & 0x7f800000UL) && (op.v & 0x001fffffUL)) || (op.v & 0x7fc00000UL) == 0x7fc00000UL)
@@ -2822,7 +2882,7 @@ template <> bool r4000_base_device::cp1_op<float32_t>(float32_t op)
 		return true;
 }
 
-template <> bool r4000_base_device::cp1_op<float64_t>(float64_t op)
+template <> bool r4000_base_device_fast::cp1_op<float64_t>(float64_t op)
 {
 	// detect denormalized or quiet NaN operand
 	if ((!(op.v & 0x7ff00000'00000000ULL) && (op.v & 0x000fffff'ffffffffULL)) || (op.v & 0x7ff80000'00000000ULL) == 0x7ff80000'00000000ULL)
@@ -2835,7 +2895,7 @@ template <> bool r4000_base_device::cp1_op<float64_t>(float64_t op)
 		return true;
 }
 
-void r5000_device::cp1_execute(u32 const op)
+void r5000_device_fast::cp1_execute(u32 const op)
 {
 	if (!(SR & SR_CU1))
 	{
@@ -3312,10 +3372,10 @@ void r5000_device::cp1_execute(u32 const op)
 		}
 	}
 
-	r4000_base_device::cp1_execute(op);
+	r4000_base_device_fast::cp1_execute(op);
 }
 
-void r4000_base_device::cp1_execute(u32 const op)
+void r4000_base_device_fast::cp1_execute(u32 const op)
 {
 	if (!(SR & SR_CU1))
 	{
@@ -4295,7 +4355,7 @@ void r4000_base_device::cp1_execute(u32 const op)
 	}
 }
 
-void r4000_base_device::cp1_mov_s(u32 const op)
+void r4000_base_device_fast::cp1_mov_s(u32 const op)
 {
 	if (SR & SR_FR)
 		m_f[FDREG] = (m_f[FDREG] & ~0xffffffffULL) | u32(m_f[FSREG]);
@@ -4316,13 +4376,13 @@ void r4000_base_device::cp1_mov_s(u32 const op)
 				m_f[FDREG & ~1] = (m_f[FDREG & ~1] & ~0xffffffffULL) | u32(m_f[FSREG & ~1]);
 }
 
-void r4000_base_device::cp1_mov_d(u32 const op)
+void r4000_base_device_fast::cp1_mov_d(u32 const op)
 {
 	if ((SR & SR_FR) || !(op & ODD_REGS))
 		m_f[FDREG] = m_f[FSREG];
 }
 
-void r4000_base_device::cp1x_execute(u32 const op)
+void r4000_base_device_fast::cp1x_execute(u32 const op)
 {
 	if (!(SR & SR_CU1))
 	{
@@ -4333,7 +4393,7 @@ void r4000_base_device::cp1x_execute(u32 const op)
 	logerror("cp1x not supported < R5000 (%s)\n", machine().describe_context());
 }
 
-void r5000_device::cp1x_execute(u32 const op)
+void r5000_device_fast::cp1x_execute(u32 const op)
 {
 	if (!(SR & SR_CU1))
 	{
@@ -4502,7 +4562,7 @@ void r5000_device::cp1x_execute(u32 const op)
 	}
 }
 
-template <typename T> void r4000_base_device::cp1_set(unsigned const reg, T const data)
+template <typename T> void r4000_base_device_fast::cp1_set(unsigned const reg, T const data)
 {
 	// translate softfloat exception flags to cause register
 	if (softfloat_exceptionFlags)
@@ -4535,7 +4595,7 @@ template <typename T> void r4000_base_device::cp1_set(unsigned const reg, T cons
 		m_f[reg] = data;
 }
 
-void r4000_base_device::cp2_execute(u32 const op)
+void r4000_base_device_fast::cp2_execute(u32 const op)
 {
 	if (!(SR & SR_CU2))
 	{
@@ -4636,7 +4696,7 @@ void r4000_base_device::cp2_execute(u32 const op)
 	}
 }
 
-inline r4000_base_device::translate_result r4000_base_device::translate(int intention, u64 &address)
+inline r4000_base_device_fast::translate_result r4000_base_device_fast::translate(int intention, u64 &address)
 {
 	/*
 	 * Decode the program address into one of the following ranges depending on
@@ -4868,7 +4928,7 @@ inline r4000_base_device::translate_result r4000_base_device::translate(int inte
 	return MISS;
 }
 
-void r4000_base_device::address_error(int intention, u64 const address)
+void r4000_base_device_fast::address_error(int intention, u64 const address)
 {
 	if (!machine().side_effects_disabled() && !(intention & TRANSLATE_DEBUG_MASK))
 	{
@@ -4885,7 +4945,7 @@ void r4000_base_device::address_error(int intention, u64 const address)
 	}
 }
 
-template <typename T, bool Aligned, typename U> std::enable_if_t<std::is_convertible<U, std::function<void(T)>>::value, bool> r4000_base_device::load(u64 address, U &&apply)
+template <typename T, bool Aligned, typename U> std::enable_if_t<std::is_convertible<U, std::function<void(T)>>::value, bool> r4000_base_device_fast::load(u64 address, U &&apply)
 {
 	// alignment error
 	if (Aligned && (address & (sizeof(T) - 1)))
@@ -4948,7 +5008,7 @@ template <typename T, bool Aligned, typename U> std::enable_if_t<std::is_convert
 	return true;
 }
 
-template <typename T, typename U> std::enable_if_t<std::is_convertible<U, std::function<void(u64, T)>>::value, bool> r4000_base_device::load_linked(u64 address, U &&apply)
+template <typename T, typename U> std::enable_if_t<std::is_convertible<U, std::function<void(u64, T)>>::value, bool> r4000_base_device_fast::load_linked(u64 address, U &&apply)
 {
 	// alignment error
 	if (address & (sizeof(T) - 1))
@@ -4993,7 +5053,7 @@ template <typename T, typename U> std::enable_if_t<std::is_convertible<U, std::f
 	return true;
 }
 
-template <typename T, bool Aligned, typename U> std::enable_if_t<std::is_convertible<U, T>::value, bool> r4000_base_device::store(u64 address, U data, T mem_mask)
+template <typename T, bool Aligned, typename U> std::enable_if_t<std::is_convertible<U, T>::value, bool> r4000_base_device_fast::store(u64 address, U data, T mem_mask)
 {
 	// alignment error
 	if (Aligned && (address & (sizeof(T) - 1)))
@@ -5044,7 +5104,7 @@ template <typename T, bool Aligned, typename U> std::enable_if_t<std::is_convert
 	return true;
 }
 
-bool r4000_base_device::fetch(u64 address, std::function<void(u32)> &&apply)
+bool r4000_base_device_fast::fetch(u64 address, std::function<void(u32)> &&apply)
 {
 	u64 const program_address = address;
 
@@ -5133,7 +5193,7 @@ bool r4000_base_device::fetch(u64 address, std::function<void(u32)> &&apply)
 	return true;
 }
 
-std::string r4000_base_device::debug_string(u64 string_pointer, unsigned limit)
+std::string r4000_base_device_fast::debug_string(u64 string_pointer, unsigned limit)
 {
 	auto const suppressor(machine().disable_side_effects());
 
@@ -5162,7 +5222,7 @@ std::string r4000_base_device::debug_string(u64 string_pointer, unsigned limit)
 	return result;
 }
 
-std::string r4000_base_device::debug_string_array(u64 array_pointer)
+std::string r4000_base_device_fast::debug_string_array(u64 array_pointer)
 {
 	auto const suppressor(machine().disable_side_effects());
 
@@ -5191,7 +5251,7 @@ std::string r4000_base_device::debug_string_array(u64 array_pointer)
 	return result;
 }
 
-std::string r4000_base_device::debug_unicode_string(u64 unicode_string_pointer)
+std::string r4000_base_device_fast::debug_unicode_string(u64 unicode_string_pointer)
 {
 	auto const suppressor(machine().disable_side_effects());
 
