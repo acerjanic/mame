@@ -1,8 +1,8 @@
 // license:BSD-3-Clause
 // copyright-holders:Patrick Mackinlay
 
-#ifndef MAME_CPU_MIPS_R4000_H
-#define MAME_CPU_MIPS_R4000_H
+#ifndef MAME_CPU_MIPS_R4000_FAST_H
+#define MAME_CPU_MIPS_R4000_FAST_H
 
 #pragma once
 

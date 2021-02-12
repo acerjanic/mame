@@ -1,17 +1,17 @@
 // license:BSD-3-Clause
 // copyright-holders:Patrick Mackinlay
 
-#ifndef MAME_CPU_MIPS_R4000_FAST_H
-#define MAME_CPU_MIPS_R4000_FAST_H
+#ifndef MAME_CPU_MIPS_R4000_H
+#define MAME_CPU_MIPS_R4000_H
 
 #pragma once
 
-DECLARE_DEVICE_TYPE(R4000, r4000_device_fast)
-DECLARE_DEVICE_TYPE(R4400, r4400_device_fast)
-DECLARE_DEVICE_TYPE(R4600, r4600_device_fast)
-DECLARE_DEVICE_TYPE(R5000, r5000_device_fast)
+DECLARE_DEVICE_TYPE(R4000, r4000_device)
+DECLARE_DEVICE_TYPE(R4400, r4400_device)
+DECLARE_DEVICE_TYPE(R4600, r4600_device)
+DECLARE_DEVICE_TYPE(R5000, r5000_device)
 
-class r4000_base_device_fast : public cpu_device
+class r4000_base_device : public cpu_device
 {
 public:
 	enum config_mask : u32
@@ -57,7 +57,7 @@ protected:
 		CACHE_256K = 6,
 		CACHE_512K = 7,
 	};
-	r4000_base_device_fast(machine_config const &mconfig, device_type type, char const *tag, device_t *owner, u32 clock, u32 prid, u32 fcr, cache_size icache_size, cache_size dcache_size);
+	r4000_base_device(machine_config const &mconfig, device_type type, char const *tag, device_t *owner, u32 clock, u32 prid, u32 fcr, cache_size icache_size, cache_size dcache_size);
 
 	enum cp0_reg : int
 	{
@@ -574,45 +574,45 @@ protected:
 	u64 m_icache_misses;
 };
 
-class r4000_device_fast : public r4000_base_device_fast
+class r4000_device : public r4000_base_device
 {
 public:
 	// NOTE: R4000 chips prior to 3.0 have an xtlb bug
-	r4000_device_fast_fast(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock)
-		: r4000_base_device_fast(mconfig, R4000, tag, owner, clock, 0x0430, 0x0500, CACHE_8K, CACHE_8K)
+	r4000_device(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock)
+		: r4000_base_device(mconfig, R4000, tag, owner, clock, 0x0430, 0x0500, CACHE_8K, CACHE_8K)
 	{
 		// no secondary cache
 		m_cp0[CP0_Config] |= CONFIG_SC;
 	}
 };
 
-class r4400_device_fast : public r4000_base_device_fast
+class r4400_device : public r4000_base_device
 {
 public:
-	r4400_device_fast(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock)
-		: r4000_base_device_fast(mconfig, R4400, tag, owner, clock, 0x0440, 0x0500, CACHE_16K, CACHE_16K)
+	r4400_device(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock)
+		: r4000_base_device(mconfig, R4400, tag, owner, clock, 0x0440, 0x0500, CACHE_16K, CACHE_16K)
 	{
 		// no secondary cache
 		m_cp0[CP0_Config] |= CONFIG_SC;
 	}
 };
 
-class r4600_device_fast : public r4000_base_device_fast
+class r4600_device : public r4000_base_device
 {
 public:
-	r4600_device_fast(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock)
-		: r4000_base_device_fast(mconfig, R4600, tag, owner, clock, 0x2020, 0x2020, CACHE_16K, CACHE_16K)
+	r4600_device(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock)
+		: r4000_base_device(mconfig, R4600, tag, owner, clock, 0x2020, 0x2020, CACHE_16K, CACHE_16K)
 	{
 		// no secondary cache
 		m_cp0[CP0_Config] |= CONFIG_SC;
 	}
 };
 
-class r5000_device_fast : public r4000_base_device_fast
+class r5000_device : public r4000_base_device
 {
 public:
-	r5000_device_fast(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock)
-		: r4000_base_device_fast(mconfig, R5000, tag, owner, clock, 0x2320, 0x2320, CACHE_32K, CACHE_32K)
+	r5000_device(const machine_config &mconfig, const char *tag, device_t *owner, u32 clock)
+		: r4000_base_device(mconfig, R5000, tag, owner, clock, 0x2320, 0x2320, CACHE_32K, CACHE_32K)
 	{
 		// no secondary cache
 		m_cp0[CP0_Config] |= CONFIG_SC;

@@ -24,6 +24,7 @@
  *   - cache instructions
  *   - check/improve instruction timing
  *
+ *
  */
 
 #include "emu.h"
@@ -56,6 +57,74 @@
 	#define SYSCALL_IRIX53 (0)
 	#define SYSCALL_WINNT4 (0)
 #endif
+
+#define CHECK_INTERRUPTS if ((CAUSE & SR & CAUSE_IP) && (SR & SR_IE) && !(SR & (SR_EXL | SR_ERL))) {   \
+								cpu_exception(EXCEPTION_INT);										   \
+								m_branch_state = NONE;												   \
+								m_r[0] = 0;								   							   \
+								goto fetch_inst;													   \
+							}																		   
+
+#define CHECK_BUSERROR	if (m_bus_error)															   \
+							{																		   \
+								m_bus_error = false;												   \
+								cpu_exception(EXCEPTION_IBE);										   \
+								m_branch_state = NONE;												   \
+								goto fetch_inst;													   \
+							}																		   
+
+
+#define DISPATCH 	goto *opcode_table[op >> 26]
+
+#define INC_PC 	switch (m_branch_state) 		\
+					{ 								\
+						case NONE:					\
+							m_pc += 4;				\
+							break;					\
+						case DELAY:					\
+							m_branch_state = NONE;	\
+							m_pc = m_branch_target;	\
+							break;				    \
+						case BRANCH:				\
+							m_branch_state = DELAY;	\
+							m_pc += 4;				\
+							break;					\
+						case EXCEPTION:				\
+							m_branch_state = NONE;	\
+							break;				    \
+						case NULLIFY:				\
+							m_branch_state = NONE;	\
+							m_pc += 8;				\
+							break;					\
+					}								\
+					m_r[0] = 0;					
+
+#define FETCH_INSTRUCT 	do {													   \
+		if(!(m_icount-- > 0)) {													   \
+			return; 															   \
+		}																		   \
+		debugger_instruction_hook(m_pc);										   \
+		pcCopy = m_pc;															   \
+		if (pcCopy & 3)															   \
+		{																		   \
+			address_error(TRANSLATE_FETCH, pcCopy);    							   \
+			INC_PC;																   \
+			goto fetch_inst;													   \
+		}																		   \
+		t = translate(TRANSLATE_FETCH, pcCopy);									   \
+		if (t == ERROR)															   \
+		{																		   \
+			address_error(TRANSLATE_FETCH, pcCopy);								   \
+			INC_PC;																   \
+			goto fetch_inst;													   \
+		}																		   \
+		if (t == MISS) {														   \
+			INC_PC;																   \
+			goto fetch_inst;													   \
+		}																		   \
+		op = space(0).read_dword(pcCopy);										   \
+		}	while (0)
+		
 
 // operating system specific system call logging
 //#define SYSCALL_IRIX53 (1U << 0)
@@ -292,1214 +361,1558 @@ std::unique_ptr<util::disasm_interface> r4000_base_device::create_disassembler()
 void r4000_base_device::execute_run()
 {
 	u32 op;
+	//u32 decode_op;
 	u64 pcCopy;
 	translate_result t;
 	u64 product;
 	u64 sum;
 	u64 difference;
-	while (m_icount-- > 0)
-	{
-		debugger_instruction_hook(m_pc);
-		pcCopy = m_pc;
-		/*
-		fetch(m_pc,
-			[this](u32 const op)
-			{
-				// check interrupts
-				if ((CAUSE & SR & CAUSE_IP) && (SR & SR_IE) && !(SR & (SR_EXL | SR_ERL)))
-					cpu_exception(EXCEPTION_INT);
-				else
-					cpu_execute(op);
 
-				// zero register zero
-				m_r[0] = 0;
-			});
-		*/
-		
-		// alignment error
-		if (pcCopy & 3)
-		{
-			address_error(TRANSLATE_FETCH, pcCopy);
-			switch (m_branch_state)
-			{
-				case NONE:
-					m_pc += 4;
-					continue;
+	//Manual Jump Table
+	void * opcode_table[] = { 
+		&&OPCODE_SPECIAL, &&OPCODE_REGIMM, &&OPCODE_J, &&OPCODE_JAL, &&OPCODE_BEQ,
+		&&OPCODE_BNE, &&OPCODE_BLEZ, &&OPCODE_BGTZ, &&OPCODE_ADDI, &&OPCODE_ADDIU, &&OPCODE_SLTI,
+		&&OPCODE_SLTIU, &&OPCODE_ANDI, &&OPCODE_ORI, &&OPCODE_XORI, &&OPCODE_LUI, &&OPCODE_COP0,
+		&&OPCODE_COP1, &&OPCODE_COP2, &&OPCODE_COP1X, &&OPCODE_BEQL, &&OPCODE_BNEL, &&OPCODE_BLEZL, &&OPCODE_BGTZL,
+		&&OPCODE_DADDI, &&OPCODE_DADDIU, &&OPCODE_LDL, &&OPCODE_LDR, &&OPCODE_RESERVED, &&OPCODE_RESERVED, 
+		&&OPCODE_RESERVED, &&OPCODE_RESERVED, &&OPCODE_LB, &&OPCODE_LH,
+		&&OPCODE_LWL, &&OPCODE_LW, &&OPCODE_LBU, &&OPCODE_LHU, &&OPCODE_LWR, &&OPCODE_LWU,
+		&&OPCODE_SB, &&OPCODE_SH, &&OPCODE_SWL, &&OPCODE_SW, &&OPCODE_SDL, &&OPCODE_SDR, &&OPCODE_SWR,
+		&&OPCODE_CACHE, &&OPCODE_LL, &&OPCODE_LWC1, &&OPCODE_LWC2, &&OPCODE_LLD, &&OPCODE_LDC1, &&OPCODE_LDC2,
+		&&OPCODE_LD, &&OPCODE_SC, &&OPCODE_SWC1, &&OPCODE_SWC2, &&OPCODE_SCD, &&OPCODE_SDC1, &&OPCODE_SDC2, &&OPCODE_SD, &&OPCODE_RESERVED
+	};
 
-				case DELAY:
-					m_branch_state = NONE;
-					m_pc = m_branch_target;
-					continue;
-
-				case BRANCH:
-					m_branch_state = DELAY;
-					m_pc += 4;
-					continue;
-
-				case EXCEPTION:
-					m_branch_state = NONE;
-					continue;
-
-				case NULLIFY:
-					m_branch_state = NONE;
-					m_pc += 8;
-					continue;
-			}
-			//return false;
-		}
-
-		t = translate(TRANSLATE_FETCH, pcCopy);
-
-		// address error
-		if (t == ERROR)
-		{
-			address_error(TRANSLATE_FETCH, pcCopy);
-			switch (m_branch_state)
-			{
-				case NONE:
-					m_pc += 4;
-					continue;
-
-				case DELAY:
-					m_branch_state = NONE;
-					m_pc = m_branch_target;
-					continue;
-
-				case BRANCH:
-					m_branch_state = DELAY;
-					m_pc += 4;
-					continue;
-
-				case EXCEPTION:
-					m_branch_state = NONE;
-					continue;
-
-				case NULLIFY:
-					m_branch_state = NONE;
-					m_pc += 8;
-					continue;
-			}
-			//return false;
-		}
-
-		// tlb miss
-		if (t == MISS) {
-			switch (m_branch_state)
-			{
-				case NONE:
-					m_pc += 4;
-					continue;
-
-				case DELAY:
-					m_branch_state = NONE;
-					m_pc = m_branch_target;
-					continue;
-
-				case BRANCH:
-					m_branch_state = DELAY;
-					m_pc += 4;
-					continue;
-
-				case EXCEPTION:
-					m_branch_state = NONE;
-					continue;
-
-				case NULLIFY:
-					m_branch_state = NONE;
-					m_pc += 8;
-					continue;
-			}
-		}
-
-		op = space(0).read_dword(pcCopy);
-
-		if (m_bus_error)
-		{
-			m_bus_error = false;
-			cpu_exception(EXCEPTION_IBE);
-			// m_branch_state is always EXCEPTION after cpu_exception is called
-			m_branch_state = NONE;
-			continue;
-
-		}
-		else
+	//Manual Jump Table
+	void * opcode_special_table[] = { 
+		&&SPCODE_SLL, &&SPCODE_RESERVED, &&SPCODE_SRL, &&SPCODE_SRA, &&SPCODE_SLLV, 
+		&&SPCODE_RESERVED, &&SPCODE_SRLV, &&SPCODE_SRAV, &&SPCODE_JR, &&SPCODE_JALR, 
+		&&SPCODE_RESERVED, &&SPCODE_RESERVED, &&SPCODE_SYSCALL, &&SPCODE_BREAK, 
+		&&SPCODE_RESERVED, &&SPCODE_SYNC, &&SPCODE_MFHI, &&SPCODE_MTHI, &&SPCODE_MFLO, 
+		&&SPCODE_MTLO, &&SPCODE_DSLLV, &&SPCODE_RESERVED, &&SPCODE_DSRLV, &&SPCODE_DSRAV, 
+		&&SPCODE_MULT, &&SPCODE_MULTU, &&SPCODE_DIV, &&SPCODE_DIVU, &&SPCODE_DMULT, 
+		&&SPCODE_DMULTU, &&SPCODE_DDIV, &&SPCODE_DDIVU, &&SPCODE_ADD, &&SPCODE_ADDU, 
+		&&SPCODE_SUB, &&SPCODE_SUBU, &&SPCODE_AND, &&SPCODE_OR, &&SPCODE_XOR, &&SPCODE_NOR, 
+		&&SPCODE_RESERVED, &&SPCODE_RESERVED, &&SPCODE_SLT, &&SPCODE_SLTU, &&SPCODE_DADD, 
+		&&SPCODE_DADDU, &&SPCODE_DSUB, &&SPCODE_DSUBU, &&SPCODE_TGE, &&SPCODE_TGEU, 
+		&&SPCODE_TLT, &&SPCODE_TLTU, &&SPCODE_TEQ, &&SPCODE_RESERVED, &&SPCODE_TNE, 
+		&&SPCODE_DSLL, &&SPCODE_RESERVED, &&SPCODE_DSRL, &&SPCODE_DSRA, &&SPCODE_DSLL32, 
+		&&SPCODE_RESERVED, &&SPCODE_DSRL32, &&SPCODE_DSRA32
+	};
+	
+	/*
+	debugger_instruction_hook(m_pc);
+	pcCopy = m_pc;
+	fetch(m_pc,
+		[this](u32 const op)
 		{
 			// check interrupts
-			if ((CAUSE & SR & CAUSE_IP) && (SR & SR_IE) && !(SR & (SR_EXL | SR_ERL))) {
+			if ((CAUSE & SR & CAUSE_IP) && (SR & SR_IE) && !(SR & (SR_EXL | SR_ERL)))
 				cpu_exception(EXCEPTION_INT);
-				m_branch_state = NONE;
-				// zero register zero
-				m_r[0] = 0;
-				continue;
-			}
 			else
-				switch (op >> 26)
-				{
-				case OPCODE_SPECIAL: // SPECIAL
-					switch (op & 0x3f)
-					{
-					case 0x00: // SLL
-						m_r[RDREG] = s64(s32(m_r[RTREG] << SHIFT));
-						break;
-					//case 0x01: // *
-					case 0x02: // SRL
-						m_r[RDREG] = s64(s32(u32(m_r[RTREG]) >> SHIFT));
-						break;
-					case 0x03: // SRA
-						m_r[RDREG] = s64(s32(m_r[RTREG]) >> SHIFT);
-						break;
-					case 0x04: // SLLV
-						m_r[RDREG] = s64(s32(m_r[RTREG] << (m_r[RSREG] & 31)));
-						break;
-					//case 0x05: // *
-					case 0x06: // SRLV
-						m_r[RDREG] = s64(s32(u32(m_r[RTREG]) >> (m_r[RSREG] & 31)));
-						break;
-					case 0x07: // SRAV
-						m_r[RDREG] = s64(s32(m_r[RTREG]) >> (m_r[RSREG] & 31));
-						break;
-					case 0x08: // JR
-						//m_branch_state = BRANCH;
-						//m_branch_target = ADDR(m_r[RSREG], 0);
-						m_branch_target = m_r[RSREG];
-						m_branch_state = DELAY;
-						m_pc += 4;
-						m_r[0] = 0;
-						continue;
-						//break;
-					case 0x09: // JALR
-						//m_branch_state = BRANCH;
-						//m_branch_target = ADDR(m_r[RSREG], 0);
-						m_branch_target = m_r[RSREG];
-						m_r[RDREG] = ADDR(m_pc, 8);
-						m_branch_state = DELAY;
-						m_pc += 4;
-						m_r[0] = 0;
-						continue;
-						//break;
-					//case 0x0a: // *
-					//case 0x0b: // *
-					case 0x0c: // SYSCALL
-						if (VERBOSE & LOG_SYSCALL)
-						{
-							if (SYSCALL_MASK & SYSCALL_IRIX53)
-							{
-								switch (m_r[2])
-								{
-								case 0x3e9: // 1001 = exit
-									LOGMASKED(LOG_SYSCALL, "exit(%d) (%s)\n", m_r[4], machine().describe_context());
-									break;
-
-								case 0x3ea: // 1002 = fork
-									LOGMASKED(LOG_SYSCALL, "fork() (%s)\n", machine().describe_context());
-									break;
-
-								case 0x3eb: // 1003 = read
-									LOGMASKED(LOG_SYSCALL, "read(%d, 0x%x, %d) (%s)\n", m_r[4], m_r[5], m_r[6], machine().describe_context());
-									break;
-
-								case 0x3ec: // 1004 = write
-									LOGMASKED(LOG_SYSCALL, "write(%d, 0x%x, %d) (%s)\n", m_r[4], m_r[5], m_r[6], machine().describe_context());
-									if (m_r[4] == 1 || m_r[4] == 2)
-										printf("%s", debug_string(m_r[5], m_r[6]).c_str());
-									break;
-
-								case 0x3ed: // 1005 = open
-									LOGMASKED(LOG_SYSCALL, "open(\"%s\", %#o) (%s)\n", debug_string(m_r[4]), m_r[5], machine().describe_context());
-									break;
-
-								case 0x3ee: // 1006 = close
-									LOGMASKED(LOG_SYSCALL, "close(%d) (%s)\n", m_r[4], machine().describe_context());
-									break;
-
-								case 0x3ef: // 1007 = creat
-									LOGMASKED(LOG_SYSCALL, "creat(\"%s\", %#o) (%s)\n", debug_string(m_r[4]), m_r[5], machine().describe_context());
-									break;
-
-								case 0x423: // 1059 = exece
-									LOGMASKED(LOG_SYSCALL, "exece(\"%s\", [ %s ], [ %s ]) (%s)\n", debug_string(m_r[4]), debug_string_array(m_r[5]), debug_string_array(m_r[6]), machine().describe_context());
-									break;
-
-								default:
-									LOGMASKED(LOG_SYSCALL, "syscall 0x%x (%s)\n", m_r[2], machine().describe_context());
-									break;
-								}
-							}
-							else if (SYSCALL_MASK & SYSCALL_WINNT4)
-								LOGMASKED(LOG_SYSCALL, "syscall 0x%02x from 0x%08x (%s)\n", m_r[2], u32(m_r[31] - 8), machine().describe_context());
-						}
-						cpu_exception(EXCEPTION_SYS);
-						m_branch_state = NONE;
-						// zero register zero
-						m_r[0] = 0;
-						continue;
-					case 0x0d: // BREAK
-						cpu_exception(EXCEPTION_BP);
-						m_branch_state = NONE;
-						// zero register zero
-						m_r[0] = 0;
-						continue;
-					//case 0x0e: // *
-					case 0x0f: // SYNC
-						break;
-					case 0x10: // MFHI
-						m_r[RDREG] = m_hi;
-						break;
-					case 0x11: // MTHI
-						m_hi = m_r[RSREG];
-						break;
-					case 0x12: // MFLO
-						m_r[RDREG] = m_lo;
-						break;
-					case 0x13: // MTLO
-						m_lo = m_r[RSREG];
-						break;
-					case 0x14: // DSLLV
-						m_r[RDREG] = m_r[RTREG] << (m_r[RSREG] & 63);
-						break;
-					//case 0x15: // *
-					case 0x16: // DSRLV
-						m_r[RDREG] = m_r[RTREG] >> (m_r[RSREG] & 63);
-						break;
-					case 0x17: // DSRAV
-						m_r[RDREG] = s64(m_r[RTREG]) >> (m_r[RSREG] & 63);
-						break;
-					case 0x18: // MULT
-						{
-							product = mul_32x32(s32(m_r[RSREG]), s32(m_r[RTREG]));
-
-							m_lo = s64(s32(product));
-							m_hi = s64(s32(product >> 32));
-						}
-						break;
-					case 0x19: // MULTU
-						{
-							product = mulu_32x32(u32(m_r[RSREG]), u32(m_r[RTREG]));
-
-							m_lo = s64(s32(product));
-							m_hi = s64(s32(product >> 32));
-						}
-						break;
-					case 0x1a: // DIV
-						if (m_r[RTREG])
-						{
-							m_lo = s64(s32(m_r[RSREG]) / s32(m_r[RTREG]));
-							m_hi = s64(s32(m_r[RSREG]) % s32(m_r[RTREG]));
-						}
-						break;
-					case 0x1b: // DIVU
-						if (m_r[RTREG])
-						{
-							m_lo = s64(s32(u32(m_r[RSREG]) / u32(m_r[RTREG])));
-							m_hi = s64(s32(u32(m_r[RSREG]) % u32(m_r[RTREG])));
-						}
-						break;
-					case 0x1c: // DMULT
-						m_lo = mul_64x64(m_r[RSREG], m_r[RTREG], *reinterpret_cast<s64 *>(&m_hi));
-						break;
-					case 0x1d: // DMULTU
-						m_lo = mulu_64x64(m_r[RSREG], m_r[RTREG], m_hi);
-						break;
-					case 0x1e: // DDIV
-						if (m_r[RTREG])
-						{
-							m_lo = s64(m_r[RSREG]) / s64(m_r[RTREG]);
-							m_hi = s64(m_r[RSREG]) % s64(m_r[RTREG]);
-						}
-						break;
-					case 0x1f: // DDIVU
-						if (m_r[RTREG])
-						{
-							m_lo = m_r[RSREG] / m_r[RTREG];
-							m_hi = m_r[RSREG] % m_r[RTREG];
-						}
-						break;
-					case 0x20: // ADD
-						{
-							sum = u32(m_r[RSREG]) + u32(m_r[RTREG]);
-
-							// overflow: (sign(addend0) == sign(addend1)) && (sign(addend0) != sign(sum))
-							if (!BIT(u32(m_r[RSREG]) ^ u32(m_r[RTREG]), 31) && BIT(u32(m_r[RSREG]) ^ sum, 31)) {
-								cpu_exception(EXCEPTION_OV);
-								m_branch_state = NONE;
-								// zero register zero
-								m_r[0] = 0;
-								continue;
-							}
-							else
-								m_r[RDREG] = s64(s32(sum));
-						}
-						break;
-					case 0x21: // ADDU
-						m_r[RDREG] = s64(s32(u32(m_r[RSREG]) + u32(m_r[RTREG])));
-						break;
-					case 0x22: // SUB
-						{
-							difference = u32(m_r[RSREG]) - u32(m_r[RTREG]);
-
-							// overflow: (sign(minuend) != sign(subtrahend)) && (sign(minuend) != sign(difference))
-							if (BIT(u32(m_r[RSREG]) ^ u32(m_r[RTREG]), 31) && BIT(u32(m_r[RSREG]) ^ difference, 31)) {
-								cpu_exception(EXCEPTION_OV);
-								m_branch_state = NONE;
-								// zero register zero
-								m_r[0] = 0;
-								continue;
-							}		
-							else
-								m_r[RDREG] = s64(s32(difference));
-						}
-						break;
-					case 0x23: // SUBU
-						m_r[RDREG] = s64(s32(u32(m_r[RSREG]) - u32(m_r[RTREG])));
-						break;
-					case 0x24: // AND
-						m_r[RDREG] = m_r[RSREG] & m_r[RTREG];
-						break;
-					case 0x25: // OR
-						m_r[RDREG] = m_r[RSREG] | m_r[RTREG];
-						break;
-					case 0x26: // XOR
-						m_r[RDREG] = m_r[RSREG] ^ m_r[RTREG];
-						break;
-					case 0x27: // NOR
-						m_r[RDREG] = ~(m_r[RSREG] | m_r[RTREG]);
-						break;
-					//case 0x28: // *
-					//case 0x29: // *
-					case 0x2a: // SLT
-						m_r[RDREG] = s64(m_r[RSREG]) < s64(m_r[RTREG]);
-						break;
-					case 0x2b: // SLTU
-						m_r[RDREG] = m_r[RSREG] < m_r[RTREG];
-						break;
-					case 0x2c: // DADD
-						{
-							sum = m_r[RSREG] + m_r[RTREG];
-
-							// overflow: (sign(addend0) == sign(addend1)) && (sign(addend0) != sign(sum))
-							if (!BIT(m_r[RSREG] ^ m_r[RTREG], 63) && BIT(m_r[RSREG] ^ sum, 63)) {
-								cpu_exception(EXCEPTION_OV);
-								m_branch_state = NONE;
-								// zero register zero
-								m_r[0] = 0;
-								continue;
-							}
-							else
-								m_r[RDREG] = sum;
-						}
-						break;
-					case 0x2d: // DADDU
-						m_r[RDREG] = m_r[RSREG] + m_r[RTREG];
-						break;
-					case 0x2e: // DSUB
-						{
-							difference = m_r[RSREG] - m_r[RTREG];
-
-							// overflow: (sign(minuend) != sign(subtrahend)) && (sign(minuend) != sign(difference))
-							if (BIT(m_r[RSREG] ^ m_r[RTREG], 63) && BIT(m_r[RSREG] ^ difference, 63)) {
-								cpu_exception(EXCEPTION_OV);								
-								m_branch_state = NONE;
-								// zero register zero
-								m_r[0] = 0;
-								continue;
-							}
-							else
-								m_r[RDREG] = difference;
-						}
-						break;
-					case 0x2f: // DSUBU
-						m_r[RDREG] = m_r[RSREG] - m_r[RTREG];
-						break;
-					case 0x30: // TGE
-						if (s64(m_r[RSREG]) >= s64(m_r[RTREG])) {
-								cpu_exception(EXCEPTION_TR);
-								m_branch_state = NONE;
-								// zero register zero
-								m_r[0] = 0;
-								continue;
-						}
-						break;
-					case 0x31: // TGEU
-						if (m_r[RSREG] >= m_r[RTREG]) {
-							cpu_exception(EXCEPTION_TR);
-							m_branch_state = NONE;
-							// zero register zero
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					case 0x32: // TLT
-						if (s64(m_r[RSREG]) < s64(m_r[RTREG])) {
-							cpu_exception(EXCEPTION_TR);
-							m_branch_state = NONE;
-							// zero register zero
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					case 0x33: // TLTU
-						if (m_r[RSREG] < m_r[RTREG]) {
-							cpu_exception(EXCEPTION_TR);
-							m_branch_state = NONE;
-							// zero register zero
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					case 0x34: // TEQ
-						if (m_r[RSREG] == m_r[RTREG]) {
-							cpu_exception(EXCEPTION_TR);			
-							m_branch_state = NONE;
-							// zero register zero
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					//case 0x35: // *
-					case 0x36: // TNE
-						if (m_r[RSREG] != m_r[RTREG]) {
-							cpu_exception(EXCEPTION_TR);
-							m_branch_state = NONE;
-							// zero register zero
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					//case 0x37: // *
-					case 0x38: // DSLL
-						m_r[RDREG] = m_r[RTREG] << SHIFT;
-						break;
-					//case 0x39: // *
-					case 0x3a: // DSRL
-						m_r[RDREG] = m_r[RTREG] >> SHIFT;
-						break;
-					case 0x3b: // DSRA
-						m_r[RDREG] = s64(m_r[RTREG]) >> SHIFT;
-						break;
-					case 0x3c: // DSLL32
-						m_r[RDREG] = m_r[RTREG] << (SHIFT + 32);
-						break;
-					//case 0x3d: // *
-					case 0x3e: // DSRL32
-						m_r[RDREG] = m_r[RTREG] >> (SHIFT + 32);
-						break;
-					case 0x3f: // DSRA32
-						m_r[RDREG] = s64(m_r[RTREG]) >> (SHIFT + 32);
-						break;
-
-					default:
-						handle_reserved_instruction(op);
-						break;
-					}
-					break;
-				case OPCODE_REGIMM: // REGIMM
-					switch ((op >> 16) & 0x1f)
-					{
-					case 0x00: // BLTZ
-						if (s64(m_r[RSREG]) < 0)
-						{
-							//m_branch_state = BRANCH;
-							//Skip the middle man
-							m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-							m_branch_state = DELAY;
-							m_pc += 4;
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					case 0x01: // BGEZ
-						if (s64(m_r[RSREG]) >= 0)
-						{
-							//m_branch_state = BRANCH;
-							m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-							m_branch_state = DELAY;
-							m_pc += 4;
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					case 0x02: // BLTZL
-						if (s64(m_r[RSREG]) < 0)
-						{
-							//m_branch_state = BRANCH;
-							m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-							m_branch_state = DELAY;
-							m_pc += 4;
-							m_r[0] = 0;
-							continue;
-						}
-						else {
-							//m_branch_state = NULLIFY;
-							m_branch_state = NONE;
-							m_pc += 8;
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					case 0x03: // BGEZL
-						if (s64(m_r[RSREG]) >= 0)
-						{
-							//m_branch_state = BRANCH;
-							m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-							m_branch_state = DELAY;
-							m_pc += 4;
-							m_r[0] = 0;
-							continue;
-						}
-						else {
-							//m_branch_state = NULLIFY;
-							m_branch_state = NONE;
-							m_pc += 8;
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					//case 0x04: // *
-					//case 0x05: // *
-					//case 0x06: // *
-					//case 0x07: // *
-					case 0x08: // TGEI
-						if (s64(m_r[RSREG]) >= s16(op)) {
-							cpu_exception(EXCEPTION_TR);
-							m_branch_state = NONE;
-							// zero register zero
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					case 0x09: // TGEIU
-						if (m_r[RSREG] >= u64(s64(s16(op)))) {
-							cpu_exception(EXCEPTION_TR);
-							m_branch_state = NONE;
-							// zero register zero
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					case 0x0a: // TLTI
-						if (s64(m_r[RSREG]) < s16(op)) {
-							cpu_exception(EXCEPTION_TR);
-							m_branch_state = NONE;
-							// zero register zero
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					case 0x0b: // TLTIU
-						if (m_r[RSREG] >= u64(s64(s16(op)))) {
-							cpu_exception(EXCEPTION_TR);
-							m_branch_state = NONE;
-							// zero register zero
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					case 0x0c: // TEQI
-						if (m_r[RSREG] == u64(s64(s16(op)))) {
-							cpu_exception(EXCEPTION_TR);
-							m_branch_state = NONE;
-							// zero register zero
-							m_r[0] = 0;
-							continue;
-						}
-						break;
-					//case 0x0d: // *
-					case 0x0e: // TNEI
-						if (m_r[RSREG] != u64(s64(s16(op)))) {
-							cpu_exception(EXCEPTION_TR);
-							m_branch_state = NONE;
-							// zero register zero
-							m_r[0] = 0;
-							continue;	
-						}
-						break;
-					//case 0x0f: // *
-					case 0x10: // BLTZAL
-						if (s64(m_r[RSREG]) < 0)
-						{
-							//m_branch_state = BRANCH;
-							m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-							m_r[31] = ADDR(m_pc, 8);
-							m_branch_state = DELAY;
-							m_pc += 4;
-							m_r[0] = 0;
-							continue;
-						}
-						m_r[31] = ADDR(m_pc, 8);
-						break;
-					case 0x11: // BGEZAL
-						if (s64(m_r[RSREG]) >= 0)
-						{
-							//m_branch_state = BRANCH;
-							m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-							m_r[31] = ADDR(m_pc, 8);
-							m_branch_state = DELAY;
-							m_pc += 4;
-							m_r[0] = 0;
-							continue;
-						}
-						m_r[31] = ADDR(m_pc, 8);
-						break;
-					case 0x12: // BLTZALL
-						if (s64(m_r[RSREG]) < 0)
-						{
-							//m_branch_state = BRANCH;
-							m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-							m_r[31] = ADDR(m_pc, 8);
-							m_branch_state = DELAY;
-							m_pc += 4;
-							m_r[0] = 0;
-							continue;
-						}
-						else
-							m_branch_state = NULLIFY;
-						m_r[31] = ADDR(m_pc, 8);
-						break;
-					case 0x13: // BGEZALL
-						if (s64(m_r[RSREG]) >= 0)
-						{
-							//m_branch_state = BRANCH;
-							m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-							m_r[31] = ADDR(m_pc, 8);
-							m_branch_state = DELAY;
-							m_pc += 4;
-							m_r[0] = 0;
-							continue;
-						}
-						else
-							m_branch_state = NULLIFY;
-						m_r[31] = ADDR(m_pc, 8);
-						break;
-					//case 0x14: // *
-					//case 0x15: // *
-					//case 0x16: // *
-					//case 0x17: // *
-					//case 0x18: // *
-					//case 0x19: // *
-					//case 0x1a: // *
-					//case 0x1b: // *
-					//case 0x1c: // *
-					//case 0x1d: // *
-					//case 0x1e: // *
-					//case 0x1f: // *
-
-					default:
-						// * Operation codes marked with an asterisk cause reserved
-						// instruction exceptions in all current implementations and are
-						// reserved for future versions of the architecture.
-						handle_reserved_instruction(op);
-						break;
-					}
-					break;
-				case OPCODE_J: // J
-					//m_branch_state = BRANCH;
-					m_branch_target = (ADDR(m_pc, 4) & ~0x0fffffffULL) | ((op & 0x03ffffffU) << 2);
-					m_branch_state = DELAY;
-					m_pc += 4;
-					m_r[0] = 0;
-					continue;
-					//break;
-				case OPCODE_JAL: // JAL
-					//m_branch_state = BRANCH;
-					m_branch_target = (ADDR(m_pc, 4) & ~0x0fffffffULL) | ((op & 0x03ffffffU) << 2);
-					m_r[31] = ADDR(m_pc, 8);
-					m_branch_state = DELAY;
-					m_pc += 4;
-					m_r[0] = 0;
-					continue;
-					//break;
-				case OPCODE_BEQ: // BEQ
-					if (m_r[RSREG] == m_r[RTREG])
-					{
-						//m_branch_state = BRANCH;
-						m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-						m_branch_state = DELAY;
-						m_pc += 4;
-						m_r[0] = 0;
-						continue;
-					}
-					break;
-				case OPCODE_BNE: // BNE
-					if (m_r[RSREG] != m_r[RTREG])
-					{
-						//m_branch_state = BRANCH;
-						m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-						m_branch_state = DELAY;
-						m_pc += 4;
-						m_r[0] = 0;
-						continue;
-					}
-					break;
-				case OPCODE_BLEZ: // BLEZ
-					if (s64(m_r[RSREG]) <= 0)
-					{
-						//m_branch_state = BRANCH;
-						m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-						m_branch_state = DELAY;
-						m_pc += 4;
-						m_r[0] = 0;
-						continue;
-					}
-					break;
-				case OPCODE_BGTZ: // BGTZ
-					if (s64(m_r[RSREG]) > 0)
-					{
-						//m_branch_state = BRANCH;
-						m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-						m_branch_state = DELAY;
-						m_pc += 4;
-						m_r[0] = 0;
-						continue;
-					}
-					break;
-				case OPCODE_ADDI: // ADDI
-					{
-						sum = u32(m_r[RSREG]) + s16(op);
-
-						// overflow: (sign(addend0) == sign(addend1)) && (sign(addend0) != sign(sum))
-						if (!BIT(u32(m_r[RSREG]) ^ s32(s16(op)), 31) && BIT(u32(m_r[RSREG]) ^ sum, 31)) {
-							cpu_exception(EXCEPTION_OV);
-							m_branch_state = NONE;
-							// zero register zero
-							m_r[0] = 0;
-							continue;
-						}
-						else
-							m_r[RTREG] = s64(s32(sum));
-					}
-					break;
-				case OPCODE_ADDIU: // ADDIU
-					m_r[RTREG] = s64(s32(u32(m_r[RSREG]) + s16(op)));
-					break;
-				case OPCODE_SLTI: // SLTI
-					m_r[RTREG] = s64(m_r[RSREG]) < s64(s16(op));
-					break;
-				case OPCODE_SLTIU: // SLTIU
-					m_r[RTREG] = m_r[RSREG] < u64(s64(s16(op)));
-					break;
-				case OPCODE_ANDI: // ANDI
-					m_r[RTREG] = m_r[RSREG] & u16(op);
-					break;
-				case OPCODE_ORI: // ORI
-					m_r[RTREG] = m_r[RSREG] | u16(op);
-					break;
-				case OPCODE_XORI: // XORI
-					m_r[RTREG] = m_r[RSREG] ^ u16(op);
-					break;
-				case OPCODE_LUI: // LUI
-					m_r[RTREG] = s64(s16(op)) << 16;
-					break;
-				case OPCODE_COP0: // COP0
-					cp0_execute(op);
-					break;
-				case OPCODE_COP1: // COP1
-					cp1_execute(op);
-					break;
-				case OPCODE_COP2: // COP2
-					cp2_execute(op);
-					break;
-				case OPCODE_COP1X: // COP1X
-					cp1x_execute(op);
-					break;
-				case OPCODE_BEQL: // BEQL
-					if (m_r[RSREG] == m_r[RTREG])
-					{
-						//m_branch_state = BRANCH;
-						m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-						m_branch_state = DELAY;
-						m_pc += 4;
-						m_r[0] = 0;
-						continue;
-					}
-					else {
-						//m_branch_state = NULLIFY;
-						m_branch_state = NONE;
-						m_pc += 8;
-						m_r[0] = 0;
-						continue;
-					}
-					break;
-				case OPCODE_BNEL: // BNEL
-					if (m_r[RSREG] != m_r[RTREG])
-					{
-						//m_branch_state = BRANCH;
-						m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-						m_branch_state = DELAY;
-						m_pc += 4;
-						m_r[0] = 0;
-						continue;
-					}
-					else {
-						//m_branch_state = NULLIFY;
-						m_branch_state = NONE;
-						m_pc += 8;
-						m_r[0] = 0;
-						continue;
-					}
-					break;
-				case OPCODE_BLEZL: // BLEZL
-					if (s64(m_r[RSREG]) <= 0)
-					{
-						//m_branch_state = BRANCH;
-						m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-						m_branch_state = DELAY;
-						m_pc += 4;
-						m_r[0] = 0;
-						continue;
-					}
-					else {
-						//m_branch_state = NULLIFY;
-						m_branch_state = NONE;
-						m_pc += 8;
-						m_r[0] = 0;
-						continue;
-					}
-					break;
-				case OPCODE_BGTZL: // BGTZL
-					if (s64(m_r[RSREG]) > 0)
-					{
-						//m_branch_state = BRANCH;
-						m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
-						m_branch_state = DELAY;
-						m_pc += 4;
-						m_r[0] = 0;
-						continue;
-					}
-					else {
-						//m_branch_state = NULLIFY;
-						m_branch_state = NONE;
-						m_pc += 8;
-						m_r[0] = 0;
-						continue;
-					}
-					break;
-				case OPCODE_DADDI: // DADDI
-					{
-						sum = m_r[RSREG] + s64(s16(op));
-
-						// overflow: (sign(addend0) == sign(addend1)) && (sign(addend0) != sign(sum))
-						if (!BIT(m_r[RSREG] ^ s64(s16(op)), 63) && BIT(m_r[RSREG] ^ sum, 63)) {
-							cpu_exception(EXCEPTION_OV);
-							m_branch_state = NONE;
-							// zero register zero
-							m_r[0] = 0;
-							continue;
-						}
-						else
-							m_r[RTREG] = sum;
-					}
-					break;
-				case OPCODE_DADDIU: // DADDIU
-					m_r[RTREG] = m_r[RSREG] + s64(s16(op));
-					break;
-				case OPCODE_LDL: // LDL
-					if (!(SR & SR_KSU) || (SR & (SR_EXL | SR_ERL)) || cp0_64())
-						cpu_ldl(op);
-					else {
-						cpu_exception(EXCEPTION_RI);
-						m_branch_state = NONE;
-						// zero register zero
-						m_r[0] = 0;
-						continue;
-					}
-					break;
-				case OPCODE_LDR: // LDR
-					if (!(SR & SR_KSU) || (SR & (SR_EXL | SR_ERL)) || cp0_64())
-						cpu_ldr(op);
-					else {
-						cpu_exception(EXCEPTION_RI);
-						m_branch_state = NONE;
-						// zero register zero
-						m_r[0] = 0;
-						continue;
-					}
-					break;
-				//case 0x1c: // *
-				//case 0x1d: // *
-				//case 0x1e: // *
-				//case 0x1f: // *
-				case OPCODE_LB: // LB
-					load<u8>(ADDR(m_r[RSREG], s16(op)),
-						[this, op](s8 data)
-						{
-							m_r[RTREG] = data;
-						});
-					break;
-				case OPCODE_LH: // LH
-					load<u16>(ADDR(m_r[RSREG], s16(op)),
-						[this, op](s16 data)
-						{
-							m_r[RTREG] = data;
-						});
-					break;
-				case OPCODE_LWL: // LWL
-					cpu_lwl(op);
-					break;
-				case OPCODE_LW: // LW
-					load<u32>(ADDR(m_r[RSREG], s16(op)),
-						[this, op](s32 data)
-						{
-							m_r[RTREG] = data;
-						});
-					break;
-				case OPCODE_LBU: // LBU
-					load<u8>(ADDR(m_r[RSREG], s16(op)),
-						[this, op](u8 data)
-						{
-							m_r[RTREG] = data;
-						});
-					break;
-				case OPCODE_LHU: // LHU
-					load<u16>(ADDR(m_r[RSREG], s16(op)),
-						[this, op](u16 data)
-						{
-							m_r[RTREG] = data;
-						});
-					break;
-				case OPCODE_LWR: // LWR
-					cpu_lwr(op);
-					break;
-				case OPCODE_LWU: // LWU
-					load<u32>(ADDR(m_r[RSREG], s16(op)),
-						[this, op](u32 data)
-						{
-							m_r[RTREG] = data;
-						});
-					break;
-				case OPCODE_SB: // SB
-					store<u8>(ADDR(m_r[RSREG], s16(op)), u8(m_r[RTREG]));
-					break;
-				case OPCODE_SH: // SH
-					store<u16>(ADDR(m_r[RSREG], s16(op)), u16(m_r[RTREG]));
-					break;
-				case OPCODE_SWL: // SWL
-					cpu_swl(op);
-					break;
-				case OPCODE_SW: // SW
-					store<u32>(ADDR(m_r[RSREG], s16(op)), u32(m_r[RTREG]));
-					break;
-				case OPCODE_SDL: // SDL
-					if (!(SR & SR_KSU) || (SR & (SR_EXL | SR_ERL)) || cp0_64())
-						cpu_sdl(op);
-					else {
-						cpu_exception(EXCEPTION_RI);
-						m_branch_state = NONE;
-						// zero register zero
-						m_r[0] = 0;
-						continue;
-					}
-					break;
-				case OPCODE_SDR: // SDR
-					if (!(SR & SR_KSU) || (SR & (SR_EXL | SR_ERL)) || cp0_64())
-						cpu_sdr(op);
-					else {
-						cpu_exception(EXCEPTION_RI);
-						m_branch_state = NONE;
-						// zero register zero
-						m_r[0] = 0;
-						continue;
-					}
-					break;
-				case OPCODE_SWR: // SWR
-					cpu_swr(op);
-					break;
-				case OPCODE_CACHE: // CACHE
-					if ((SR & SR_KSU) && !(SR & SR_CU0) && !(SR & (SR_EXL | SR_ERL)))
-					{
-						cpu_exception(EXCEPTION_CP0);
-						m_branch_state = NONE;
-						// zero register zero
-						m_r[0] = 0;
-						continue;
-						//break;
-					}
-
-					switch ((op >> 16) & 0x1f)
-					{
-					case 0x00: // index invalidate (I)
-						if (ICACHE)
-						{
-							m_icache_tag[(ADDR(m_r[RSREG], s16(op)) & m_icache_mask_hi) >> m_icache_shift] &= ~ICACHE_V;
-							break;
-						}
-						[[fallthrough]];
-					case 0x04: // index load tag (I)
-						if (ICACHE)
-						{
-							u32 const tag = m_icache_tag[(ADDR(m_r[RSREG], s16(op)) & m_icache_mask_hi) >> m_icache_shift];
-
-							m_cp0[CP0_TagLo] = ((tag & ICACHE_PTAG) << 8) | ((tag & ICACHE_V) >> 18) | ((tag & ICACHE_P) >> 25);
-							m_cp0[CP0_ECC] = 0; // data ecc or parity
-
-							break;
-						}
-						[[fallthrough]];
-					case 0x08: // index store tag (I)
-						if (ICACHE)
-						{
-							// FIXME: compute parity
-							m_icache_tag[(ADDR(m_r[RSREG], s16(op)) & m_icache_mask_hi) >> m_icache_shift] =
-								(m_cp0[CP0_TagLo] & TAGLO_PTAGLO) >> 8 | (m_cp0[CP0_TagLo] & TAGLO_PSTATE) << 18;
-
-							break;
-						}
-						[[fallthrough]];
-					case 0x01: // index writeback invalidate (D)
-					case 0x02: // index invalidate (SI)
-					case 0x03: // index writeback invalidate (SD)
-
-					case 0x05: // index load tag (D)
-					case 0x06: // index load tag (SI)
-					case 0x07: // index load tag (SI)
-
-					case 0x09: // index store tag (D)
-					case 0x0a: // index store tag (SI)
-					case 0x0b: // index store tag (SD)
-
-					case 0x0d: // create dirty exclusive (D)
-					case 0x0f: // create dirty exclusive (SD)
-
-					case 0x10: // hit invalidate (I)
-					case 0x11: // hit invalidate (D)
-					case 0x12: // hit invalidate (SI)
-					case 0x13: // hit invalidate (SD)
-
-					case 0x14: // fill (I)
-					case 0x15: // hit writeback invalidate (D)
-					case 0x17: // hit writeback invalidate (SD)
-
-					case 0x18: // hit writeback (I)
-					case 0x19: // hit writeback (D)
-					case 0x1b: // hit writeback (SD)
-
-					case 0x1e: // hit set virtual (SI)
-					case 0x1f: // hit set virtual (SD)
-						//LOGMASKED(LOG_CACHE, "cache 0x%08x unimplemented (%s)\n", op, machine().describe_context());
-						break;
-					}
-					break;
-				case OPCODE_LL: // LL
-					load_linked<u32>(ADDR(m_r[RSREG], s16(op)),
-						[this, op](u64 address, s32 data)
-						{
-							m_r[RTREG] = s64(data);
-							m_cp0[CP0_LLAddr] = u32(address >> 4);
-							m_ll_active = true;
-						});
-					break;
-				case OPCODE_LWC1: // LWC1
-					cp1_execute(op);
-					break;
-				case OPCODE_LWC2: // LWC2
-					cp2_execute(op);
-					break;
-				case OPCODE_LLD: // LLD
-					load_linked<u64>(ADDR(m_r[RSREG], s16(op)),
-						[this, op](u64 address, u64 data)
-						{
-							m_r[RTREG] = data;
-							m_cp0[CP0_LLAddr] = u32(address >> 4);
-							m_ll_active = true;
-						});
-					break;
-				case OPCODE_LDC1: // LDC1
-					cp1_execute(op);
-					break;
-				case OPCODE_LDC2: // LDC2
-					cp2_execute(op);
-					break;
-				case OPCODE_LD: // LD
-					load<u64>(ADDR(m_r[RSREG], s16(op)),
-						[this, op](u64 data)
-						{
-							m_r[RTREG] = data;
-						});
-					break;
-				case OPCODE_SC: // SC
-					if (m_ll_active)
-					{
-						if (store<u32>(ADDR(m_r[RSREG], s16(op)), u32(m_r[RTREG])))
-							m_r[RTREG] = 1;
-						else
-							m_r[RTREG] = 0;
-
-						m_ll_active = false;
-					}
-					else
-						m_r[RTREG] = 0;
-					break;
-				case OPCODE_SWC1: // SWC1
-					cp1_execute(op);
-					break;
-				case OPCODE_SWC2: // SWC2
-					cp2_execute(op);
-					break;
-				//case 0x3b: // *
-				case OPCODE_SCD: // SCD
-					if (m_ll_active)
-					{
-						if (store<u64>(ADDR(m_r[RSREG], s16(op)), m_r[RTREG]))
-							m_r[RTREG] = 1;
-						else
-							m_r[RTREG] = 0;
-
-						m_ll_active = false;
-					}
-					else
-						m_r[RTREG] = 0;
-					break;
-				case OPCODE_SDC1: // SDC1
-					cp1_execute(op);
-					break;
-				case OPCODE_SDC2: // SDC2
-					cp2_execute(op);
-					break;
-				case OPCODE_SD: // SD
-					store<u64>(ADDR(m_r[RSREG], s16(op)), m_r[RTREG]);
-					break;
-
-				default:
-					// * Operation codes marked with an asterisk cause reserved instruction
-					// exceptions in all current implementations and are reserved for future
-					// versions of the architecture.
-					handle_reserved_instruction(op);
-					break;
-				}
+				cpu_execute(op);
 
 			// zero register zero
 			m_r[0] = 0;
-		}
-		
+		});
+	*/
+	fetch_inst: 
+	FETCH_INSTRUCT;
+	CHECK_BUSERROR;
+	//Check interrupts before trying to execute instruction
+	CHECK_INTERRUPTS;
+	DISPATCH;
 
-		
-		//updatePCandBranchState:
-		// update pc and branch state
-		switch (m_branch_state)
+	OPCODE_SPECIAL: // SPECIAL
+		switch (op & 0x3f)
 		{
-		case NONE:
-			m_pc += 4;
+		case 0x00: // SLL
+			m_r[RDREG] = s64(s32(m_r[RTREG] << SHIFT));
 			break;
-
-		case DELAY:
-			m_branch_state = NONE;
-			m_pc = m_branch_target;
+		//case 0x01: // *
+		case 0x02: // SRL
+			m_r[RDREG] = s64(s32(u32(m_r[RTREG]) >> SHIFT));
 			break;
-
-		case BRANCH:
+		case 0x03: // SRA
+			m_r[RDREG] = s64(s32(m_r[RTREG]) >> SHIFT);
+			break;
+		case 0x04: // SLLV
+			m_r[RDREG] = s64(s32(m_r[RTREG] << (m_r[RSREG] & 31)));
+			break;
+		//case 0x05: // *
+		case 0x06: // SRLV
+			m_r[RDREG] = s64(s32(u32(m_r[RTREG]) >> (m_r[RSREG] & 31)));
+			break;
+		case 0x07: // SRAV
+			m_r[RDREG] = s64(s32(m_r[RTREG]) >> (m_r[RSREG] & 31));
+			break;
+		case 0x08: // JR
+			//m_branch_state = BRANCH;
+			//m_branch_target = ADDR(m_r[RSREG], 0);
+			m_branch_target = m_r[RSREG];
 			m_branch_state = DELAY;
 			m_pc += 4;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+			//break;
+		case 0x09: // JALR
+			//m_branch_state = BRANCH;
+			//m_branch_target = ADDR(m_r[RSREG], 0);
+			m_branch_target = m_r[RSREG];
+			m_r[RDREG] = ADDR(m_pc, 8);
+			m_branch_state = DELAY;
+			m_pc += 4;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+			//break;
+		//case 0x0a: // *
+		//case 0x0b: // *
+		case 0x0c: // SYSCALL
+			if (VERBOSE & LOG_SYSCALL)
+			{
+				if (SYSCALL_MASK & SYSCALL_IRIX53)
+				{
+					switch (m_r[2])
+					{
+					case 0x3e9: // 1001 = exit
+						LOGMASKED(LOG_SYSCALL, "exit(%d) (%s)\n", m_r[4], machine().describe_context());
+						break;
+
+					case 0x3ea: // 1002 = fork
+						LOGMASKED(LOG_SYSCALL, "fork() (%s)\n", machine().describe_context());
+						break;
+
+					case 0x3eb: // 1003 = read
+						LOGMASKED(LOG_SYSCALL, "read(%d, 0x%x, %d) (%s)\n", m_r[4], m_r[5], m_r[6], machine().describe_context());
+						break;
+
+					case 0x3ec: // 1004 = write
+						LOGMASKED(LOG_SYSCALL, "write(%d, 0x%x, %d) (%s)\n", m_r[4], m_r[5], m_r[6], machine().describe_context());
+						if (m_r[4] == 1 || m_r[4] == 2)
+							printf("%s", debug_string(m_r[5], m_r[6]).c_str());
+						break;
+
+					case 0x3ed: // 1005 = open
+						LOGMASKED(LOG_SYSCALL, "open(\"%s\", %#o) (%s)\n", debug_string(m_r[4]), m_r[5], machine().describe_context());
+						break;
+
+					case 0x3ee: // 1006 = close
+						LOGMASKED(LOG_SYSCALL, "close(%d) (%s)\n", m_r[4], machine().describe_context());
+						break;
+
+					case 0x3ef: // 1007 = creat
+						LOGMASKED(LOG_SYSCALL, "creat(\"%s\", %#o) (%s)\n", debug_string(m_r[4]), m_r[5], machine().describe_context());
+						break;
+
+					case 0x423: // 1059 = exece
+						LOGMASKED(LOG_SYSCALL, "exece(\"%s\", [ %s ], [ %s ]) (%s)\n", debug_string(m_r[4]), debug_string_array(m_r[5]), debug_string_array(m_r[6]), machine().describe_context());
+						break;
+
+					default:
+						LOGMASKED(LOG_SYSCALL, "syscall 0x%x (%s)\n", m_r[2], machine().describe_context());
+						break;
+					}
+				}
+				else if (SYSCALL_MASK & SYSCALL_WINNT4)
+					LOGMASKED(LOG_SYSCALL, "syscall 0x%02x from 0x%08x (%s)\n", m_r[2], u32(m_r[31] - 8), machine().describe_context());
+			}
+			cpu_exception(EXCEPTION_SYS);
+			m_branch_state = NONE;
+			// zero register zero
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		case 0x0d: // BREAK
+			cpu_exception(EXCEPTION_BP);
+			m_branch_state = NONE;
+			// zero register zero
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		//case 0x0e: // *
+		case 0x0f: // SYNC
+			break;
+		case 0x10: // MFHI
+			m_r[RDREG] = m_hi;
+			break;
+		case 0x11: // MTHI
+			m_hi = m_r[RSREG];
+			break;
+		case 0x12: // MFLO
+			m_r[RDREG] = m_lo;
+			break;
+		case 0x13: // MTLO
+			m_lo = m_r[RSREG];
+			break;
+		case 0x14: // DSLLV
+			m_r[RDREG] = m_r[RTREG] << (m_r[RSREG] & 63);
+			break;
+		//case 0x15: // *
+		case 0x16: // DSRLV
+			m_r[RDREG] = m_r[RTREG] >> (m_r[RSREG] & 63);
+			break;
+		case 0x17: // DSRAV
+			m_r[RDREG] = s64(m_r[RTREG]) >> (m_r[RSREG] & 63);
+			break;
+		case 0x18: // MULT
+			{
+				product = mul_32x32(s32(m_r[RSREG]), s32(m_r[RTREG]));
+
+				m_lo = s64(s32(product));
+				m_hi = s64(s32(product >> 32));
+			}
+			break;
+		case 0x19: // MULTU
+			{
+				product = mulu_32x32(u32(m_r[RSREG]), u32(m_r[RTREG]));
+
+				m_lo = s64(s32(product));
+				m_hi = s64(s32(product >> 32));
+			}
+			break;
+		case 0x1a: // DIV
+			if (m_r[RTREG])
+			{
+				m_lo = s64(s32(m_r[RSREG]) / s32(m_r[RTREG]));
+				m_hi = s64(s32(m_r[RSREG]) % s32(m_r[RTREG]));
+			}
+			break;
+		case 0x1b: // DIVU
+			if (m_r[RTREG])
+			{
+				m_lo = s64(s32(u32(m_r[RSREG]) / u32(m_r[RTREG])));
+				m_hi = s64(s32(u32(m_r[RSREG]) % u32(m_r[RTREG])));
+			}
+			break;
+		case 0x1c: // DMULT
+			m_lo = mul_64x64(m_r[RSREG], m_r[RTREG], *reinterpret_cast<s64 *>(&m_hi));
+			break;
+		case 0x1d: // DMULTU
+			m_lo = mulu_64x64(m_r[RSREG], m_r[RTREG], m_hi);
+			break;
+		case 0x1e: // DDIV
+			if (m_r[RTREG])
+			{
+				m_lo = s64(m_r[RSREG]) / s64(m_r[RTREG]);
+				m_hi = s64(m_r[RSREG]) % s64(m_r[RTREG]);
+			}
+			break;
+		case 0x1f: // DDIVU
+			if (m_r[RTREG])
+			{
+				m_lo = m_r[RSREG] / m_r[RTREG];
+				m_hi = m_r[RSREG] % m_r[RTREG];
+			}
+			break;
+		case 0x20: // ADD
+			{
+				sum = u32(m_r[RSREG]) + u32(m_r[RTREG]);
+
+				// overflow: (sign(addend0) == sign(addend1)) && (sign(addend0) != sign(sum))
+				if (!BIT(u32(m_r[RSREG]) ^ u32(m_r[RTREG]), 31) && BIT(u32(m_r[RSREG]) ^ sum, 31)) {
+					cpu_exception(EXCEPTION_OV);
+					m_branch_state = NONE;
+					// zero register zero
+					m_r[0] = 0;
+					FETCH_INSTRUCT;
+					CHECK_BUSERROR;
+					//Check interrupts before trying to execute instruction
+					CHECK_INTERRUPTS;
+					DISPATCH;
+				}
+				else
+					m_r[RDREG] = s64(s32(sum));
+			}
+			break;
+		case 0x21: // ADDU
+			m_r[RDREG] = s64(s32(u32(m_r[RSREG]) + u32(m_r[RTREG])));
+			break;
+		case 0x22: // SUB
+			{
+				difference = u32(m_r[RSREG]) - u32(m_r[RTREG]);
+
+				// overflow: (sign(minuend) != sign(subtrahend)) && (sign(minuend) != sign(difference))
+				if (BIT(u32(m_r[RSREG]) ^ u32(m_r[RTREG]), 31) && BIT(u32(m_r[RSREG]) ^ difference, 31)) {
+					cpu_exception(EXCEPTION_OV);
+					m_branch_state = NONE;
+					// zero register zero
+					m_r[0] = 0;
+					FETCH_INSTRUCT;
+					CHECK_BUSERROR;
+					//Check interrupts before trying to execute instruction
+					CHECK_INTERRUPTS;
+					DISPATCH;
+				}		
+				else
+					m_r[RDREG] = s64(s32(difference));
+			}
+			break;
+		case 0x23: // SUBU
+			m_r[RDREG] = s64(s32(u32(m_r[RSREG]) - u32(m_r[RTREG])));
+			break;
+		case 0x24: // AND
+			m_r[RDREG] = m_r[RSREG] & m_r[RTREG];
+			break;
+		case 0x25: // OR
+			m_r[RDREG] = m_r[RSREG] | m_r[RTREG];
+			break;
+		case 0x26: // XOR
+			m_r[RDREG] = m_r[RSREG] ^ m_r[RTREG];
+			break;
+		case 0x27: // NOR
+			m_r[RDREG] = ~(m_r[RSREG] | m_r[RTREG]);
+			break;
+		//case 0x28: // *
+		//case 0x29: // *
+		case 0x2a: // SLT
+			m_r[RDREG] = s64(m_r[RSREG]) < s64(m_r[RTREG]);
+			break;
+		case 0x2b: // SLTU
+			m_r[RDREG] = m_r[RSREG] < m_r[RTREG];
+			break;
+		case 0x2c: // DADD
+			{
+				sum = m_r[RSREG] + m_r[RTREG];
+
+				// overflow: (sign(addend0) == sign(addend1)) && (sign(addend0) != sign(sum))
+				if (!BIT(m_r[RSREG] ^ m_r[RTREG], 63) && BIT(m_r[RSREG] ^ sum, 63)) {
+					cpu_exception(EXCEPTION_OV);
+					m_branch_state = NONE;
+					// zero register zero
+					m_r[0] = 0;
+					FETCH_INSTRUCT;
+					CHECK_BUSERROR;
+					//Check interrupts before trying to execute instruction
+					CHECK_INTERRUPTS;
+					DISPATCH;
+				}
+				else
+					m_r[RDREG] = sum;
+			}
+			break;
+		case 0x2d: // DADDU
+			m_r[RDREG] = m_r[RSREG] + m_r[RTREG];
+			break;
+		case 0x2e: // DSUB
+			{
+				difference = m_r[RSREG] - m_r[RTREG];
+
+				// overflow: (sign(minuend) != sign(subtrahend)) && (sign(minuend) != sign(difference))
+				if (BIT(m_r[RSREG] ^ m_r[RTREG], 63) && BIT(m_r[RSREG] ^ difference, 63)) {
+					cpu_exception(EXCEPTION_OV);								
+					m_branch_state = NONE;
+					// zero register zero
+					m_r[0] = 0;
+					FETCH_INSTRUCT;
+					CHECK_BUSERROR;
+					//Check interrupts before trying to execute instruction
+					CHECK_INTERRUPTS;
+					DISPATCH;
+				}
+				else
+					m_r[RDREG] = difference;
+			}
+			break;
+		case 0x2f: // DSUBU
+			m_r[RDREG] = m_r[RSREG] - m_r[RTREG];
+			break;
+		case 0x30: // TGE
+			if (s64(m_r[RSREG]) >= s64(m_r[RTREG])) {
+					cpu_exception(EXCEPTION_TR);
+					m_branch_state = NONE;
+					// zero register zero
+					m_r[0] = 0;
+					FETCH_INSTRUCT;
+					CHECK_BUSERROR;
+					//Check interrupts before trying to execute instruction
+					CHECK_INTERRUPTS;
+					DISPATCH;
+			}
+			break;
+		case 0x31: // TGEU
+			if (m_r[RSREG] >= m_r[RTREG]) {
+				cpu_exception(EXCEPTION_TR);
+				m_branch_state = NONE;
+				// zero register zero
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		case 0x32: // TLT
+			if (s64(m_r[RSREG]) < s64(m_r[RTREG])) {
+				cpu_exception(EXCEPTION_TR);
+				m_branch_state = NONE;
+				// zero register zero
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		case 0x33: // TLTU
+			if (m_r[RSREG] < m_r[RTREG]) {
+				cpu_exception(EXCEPTION_TR);
+				m_branch_state = NONE;
+				// zero register zero
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		case 0x34: // TEQ
+			if (m_r[RSREG] == m_r[RTREG]) {
+				cpu_exception(EXCEPTION_TR);			
+				m_branch_state = NONE;
+				// zero register zero
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		//case 0x35: // *
+		case 0x36: // TNE
+			if (m_r[RSREG] != m_r[RTREG]) {
+				cpu_exception(EXCEPTION_TR);
+				m_branch_state = NONE;
+				// zero register zero
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		//case 0x37: // *
+		case 0x38: // DSLL
+			m_r[RDREG] = m_r[RTREG] << SHIFT;
+			break;
+		//case 0x39: // *
+		case 0x3a: // DSRL
+			m_r[RDREG] = m_r[RTREG] >> SHIFT;
+			break;
+		case 0x3b: // DSRA
+			m_r[RDREG] = s64(m_r[RTREG]) >> SHIFT;
+			break;
+		case 0x3c: // DSLL32
+			m_r[RDREG] = m_r[RTREG] << (SHIFT + 32);
+			break;
+		//case 0x3d: // *
+		case 0x3e: // DSRL32
+			m_r[RDREG] = m_r[RTREG] >> (SHIFT + 32);
+			break;
+		case 0x3f: // DSRA32
+			m_r[RDREG] = s64(m_r[RTREG]) >> (SHIFT + 32);
 			break;
 
-		case EXCEPTION:
-			m_branch_state = NONE;
-			break;
-
-		case NULLIFY:
-			m_branch_state = NONE;
-			m_pc += 8;
+		default:
+			handle_reserved_instruction(op);
 			break;
 		}
-	}
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_REGIMM: // REGIMM
+		switch ((op >> 16) & 0x1f)
+		{
+		case 0x00: // BLTZ
+			if (s64(m_r[RSREG]) < 0)
+			{
+				//m_branch_state = BRANCH;
+				//Skip the middle man
+				m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+				m_branch_state = DELAY;
+				m_pc += 4;
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		case 0x01: // BGEZ
+			if (s64(m_r[RSREG]) >= 0)
+			{
+				//m_branch_state = BRANCH;
+				m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+				m_branch_state = DELAY;
+				m_pc += 4;
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		case 0x02: // BLTZL
+			if (s64(m_r[RSREG]) < 0)
+			{
+				//m_branch_state = BRANCH;
+				m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+				m_branch_state = DELAY;
+				m_pc += 4;
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			else {
+				//m_branch_state = NULLIFY;
+				m_branch_state = NONE;
+				m_pc += 8;
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		case 0x03: // BGEZL
+			if (s64(m_r[RSREG]) >= 0)
+			{
+				//m_branch_state = BRANCH;
+				m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+				m_branch_state = DELAY;
+				m_pc += 4;
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			else {
+				//m_branch_state = NULLIFY;
+				m_branch_state = NONE;
+				m_pc += 8;
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		//case 0x04: // *
+		//case 0x05: // *
+		//case 0x06: // *
+		//case 0x07: // *
+		case 0x08: // TGEI
+			if (s64(m_r[RSREG]) >= s16(op)) {
+				cpu_exception(EXCEPTION_TR);
+				m_branch_state = NONE;
+				// zero register zero
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		case 0x09: // TGEIU
+			if (m_r[RSREG] >= u64(s64(s16(op)))) {
+				cpu_exception(EXCEPTION_TR);
+				m_branch_state = NONE;
+				// zero register zero
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		case 0x0a: // TLTI
+			if (s64(m_r[RSREG]) < s16(op)) {
+				cpu_exception(EXCEPTION_TR);
+				m_branch_state = NONE;
+				// zero register zero
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		case 0x0b: // TLTIU
+			if (m_r[RSREG] >= u64(s64(s16(op)))) {
+				cpu_exception(EXCEPTION_TR);
+				m_branch_state = NONE;
+				// zero register zero
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		case 0x0c: // TEQI
+			if (m_r[RSREG] == u64(s64(s16(op)))) {
+				cpu_exception(EXCEPTION_TR);
+				m_branch_state = NONE;
+				// zero register zero
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			break;
+		//case 0x0d: // *
+		case 0x0e: // TNEI
+			if (m_r[RSREG] != u64(s64(s16(op)))) {
+				cpu_exception(EXCEPTION_TR);
+				m_branch_state = NONE;
+				// zero register zero
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;	
+			}
+			break;
+		//case 0x0f: // *
+		case 0x10: // BLTZAL
+			if (s64(m_r[RSREG]) < 0)
+			{
+				//m_branch_state = BRANCH;
+				m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+				m_r[31] = ADDR(m_pc, 8);
+				m_branch_state = DELAY;
+				m_pc += 4;
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			m_r[31] = ADDR(m_pc, 8);
+			break;
+		case 0x11: // BGEZAL
+			if (s64(m_r[RSREG]) >= 0)
+			{
+				//m_branch_state = BRANCH;
+				m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+				m_r[31] = ADDR(m_pc, 8);
+				m_branch_state = DELAY;
+				m_pc += 4;
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			m_r[31] = ADDR(m_pc, 8);
+			break;
+		case 0x12: // BLTZALL
+			if (s64(m_r[RSREG]) < 0)
+			{
+				//m_branch_state = BRANCH;
+				m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+				m_r[31] = ADDR(m_pc, 8);
+				m_branch_state = DELAY;
+				m_pc += 4;
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			else
+				m_branch_state = NULLIFY;
+			m_r[31] = ADDR(m_pc, 8);
+			break;
+		case 0x13: // BGEZALL
+			if (s64(m_r[RSREG]) >= 0)
+			{
+				//m_branch_state = BRANCH;
+				m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+				m_r[31] = ADDR(m_pc, 8);
+				m_branch_state = DELAY;
+				m_pc += 4;
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			else
+				m_branch_state = NULLIFY;
+			m_r[31] = ADDR(m_pc, 8);
+			break;
+		//case 0x14: // *
+		//case 0x15: // *
+		//case 0x16: // *
+		//case 0x17: // *
+		//case 0x18: // *
+		//case 0x19: // *
+		//case 0x1a: // *
+		//case 0x1b: // *
+		//case 0x1c: // *
+		//case 0x1d: // *
+		//case 0x1e: // *
+		//case 0x1f: // *
+
+		default:
+			// * Operation codes marked with an asterisk cause reserved
+			// instruction exceptions in all current implementations and are
+			// reserved for future versions of the architecture.
+			handle_reserved_instruction(op);
+			break;
+		}
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_J: // J
+		//m_branch_state = BRANCH;
+		m_branch_target = (ADDR(m_pc, 4) & ~0x0fffffffULL) | ((op & 0x03ffffffU) << 2);
+		m_branch_state = DELAY;
+		m_pc += 4;
+		m_r[0] = 0;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_JAL: // JAL
+		//m_branch_state = BRANCH;
+		m_branch_target = (ADDR(m_pc, 4) & ~0x0fffffffULL) | ((op & 0x03ffffffU) << 2);
+		m_r[31] = ADDR(m_pc, 8);
+		m_branch_state = DELAY;
+		m_pc += 4;
+		m_r[0] = 0;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_BEQ: // BEQ
+		if (m_r[RSREG] == m_r[RTREG])
+		{
+			//m_branch_state = BRANCH;
+			m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+			m_branch_state = DELAY;
+			m_pc += 4;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_BNE: // BNE
+		if (m_r[RSREG] != m_r[RTREG])
+		{
+			//m_branch_state = BRANCH;
+			m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+			m_branch_state = DELAY;
+			m_pc += 4;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_BLEZ: // BLEZ
+		if (s64(m_r[RSREG]) <= 0)
+		{
+			//m_branch_state = BRANCH;
+			m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+			m_branch_state = DELAY;
+			m_pc += 4;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_BGTZ: // BGTZ
+		if (s64(m_r[RSREG]) > 0)
+		{
+			//m_branch_state = BRANCH;
+			m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+			m_branch_state = DELAY;
+			m_pc += 4;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_ADDI: // ADDI
+		{
+			sum = u32(m_r[RSREG]) + s16(op);
+
+			// overflow: (sign(addend0) == sign(addend1)) && (sign(addend0) != sign(sum))
+			if (!BIT(u32(m_r[RSREG]) ^ s32(s16(op)), 31) && BIT(u32(m_r[RSREG]) ^ sum, 31)) {
+				cpu_exception(EXCEPTION_OV);
+				m_branch_state = NONE;
+				// zero register zero
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			else
+				m_r[RTREG] = s64(s32(sum));
+		}
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_ADDIU: // ADDIU
+		m_r[RTREG] = s64(s32(u32(m_r[RSREG]) + s16(op)));
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SLTI: // SLTI
+		m_r[RTREG] = s64(m_r[RSREG]) < s64(s16(op));
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SLTIU: // SLTIU
+		m_r[RTREG] = m_r[RSREG] < u64(s64(s16(op)));
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_ANDI: // ANDI
+		m_r[RTREG] = m_r[RSREG] & u16(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_ORI: // ORI
+		m_r[RTREG] = m_r[RSREG] | u16(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_XORI: // XORI
+		m_r[RTREG] = m_r[RSREG] ^ u16(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LUI: // LUI
+		m_r[RTREG] = s64(s16(op)) << 16;
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_COP0: // COP0
+		cp0_execute(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_COP1: // COP1
+		cp1_execute(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_COP2: // COP2
+		cp2_execute(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_COP1X: // COP1X
+		cp1x_execute(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_BEQL: // BEQL
+		if (m_r[RSREG] == m_r[RTREG])
+		{
+			//m_branch_state = BRANCH;
+			m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+			m_branch_state = DELAY;
+			m_pc += 4;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+		else {
+			//m_branch_state = NULLIFY;
+			m_branch_state = NONE;
+			m_pc += 8;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+	OPCODE_BNEL: // BNEL
+		if (m_r[RSREG] != m_r[RTREG])
+		{
+			//m_branch_state = BRANCH;
+			m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+			m_branch_state = DELAY;
+			m_pc += 4;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+		else {
+			//m_branch_state = NULLIFY;
+			m_branch_state = NONE;
+			m_pc += 8;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+	OPCODE_BLEZL: // BLEZL
+		if (s64(m_r[RSREG]) <= 0)
+		{
+			//m_branch_state = BRANCH;
+			m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+			m_branch_state = DELAY;
+			m_pc += 4;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+		else {
+			//m_branch_state = NULLIFY;
+			m_branch_state = NONE;
+			m_pc += 8;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;	
+		}
+	OPCODE_BGTZL: // BGTZL
+		if (s64(m_r[RSREG]) > 0)
+		{
+			//m_branch_state = BRANCH;
+			m_branch_target = ADDR(m_pc + 4, s32(s16(op)) << 2);
+			m_branch_state = DELAY;
+			m_pc += 4;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+		else {
+			//m_branch_state = NULLIFY;
+			m_branch_state = NONE;
+			m_pc += 8;
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+	OPCODE_DADDI: // DADDI
+		{
+			sum = m_r[RSREG] + s64(s16(op));
+
+			// overflow: (sign(addend0) == sign(addend1)) && (sign(addend0) != sign(sum))
+			if (!BIT(m_r[RSREG] ^ s64(s16(op)), 63) && BIT(m_r[RSREG] ^ sum, 63)) {
+				cpu_exception(EXCEPTION_OV);
+				m_branch_state = NONE;
+				// zero register zero
+				m_r[0] = 0;
+				FETCH_INSTRUCT;
+				CHECK_BUSERROR;
+				//Check interrupts before trying to execute instruction
+				CHECK_INTERRUPTS;
+				DISPATCH;
+			}
+			else
+				m_r[RTREG] = sum;
+		}
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_DADDIU: // DADDIU
+		m_r[RTREG] = m_r[RSREG] + s64(s16(op));
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LDL: // LDL
+		if (!(SR & SR_KSU) || (SR & (SR_EXL | SR_ERL)) || cp0_64())
+			cpu_ldl(op);
+		else {
+			cpu_exception(EXCEPTION_RI);
+			m_branch_state = NONE;
+			// zero register zero
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LDR: // LDR
+		if (!(SR & SR_KSU) || (SR & (SR_EXL | SR_ERL)) || cp0_64())
+			cpu_ldr(op);
+		else {
+			cpu_exception(EXCEPTION_RI);
+			m_branch_state = NONE;
+			// zero register zero
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	//case 0x1c: // *
+	//case 0x1d: // *
+	//case 0x1e: // *
+	//case 0x1f: // *
+	OPCODE_LB: // LB
+		load<u8>(ADDR(m_r[RSREG], s16(op)),
+			[this, op](s8 data)
+			{
+				m_r[RTREG] = data;
+			});
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LH: // LH
+		load<u16>(ADDR(m_r[RSREG], s16(op)),
+			[this, op](s16 data)
+			{
+				m_r[RTREG] = data;
+			});
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LWL: // LWL
+		cpu_lwl(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LW: // LW
+		load<u32>(ADDR(m_r[RSREG], s16(op)),
+			[this, op](s32 data)
+			{
+				m_r[RTREG] = data;
+			});
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LBU: // LBU
+		load<u8>(ADDR(m_r[RSREG], s16(op)),
+			[this, op](u8 data)
+			{
+				m_r[RTREG] = data;
+			});
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LHU: // LHU
+		load<u16>(ADDR(m_r[RSREG], s16(op)),
+			[this, op](u16 data)
+			{
+				m_r[RTREG] = data;
+			});
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LWR: // LWR
+		cpu_lwr(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LWU: // LWU
+		load<u32>(ADDR(m_r[RSREG], s16(op)),
+			[this, op](u32 data)
+			{
+				m_r[RTREG] = data;
+			});
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SB: // SB
+		store<u8>(ADDR(m_r[RSREG], s16(op)), u8(m_r[RTREG]));
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SH: // SH
+		store<u16>(ADDR(m_r[RSREG], s16(op)), u16(m_r[RTREG]));
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SWL: // SWL
+		cpu_swl(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SW: // SW
+		store<u32>(ADDR(m_r[RSREG], s16(op)), u32(m_r[RTREG]));
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SDL: // SDL
+		if (!(SR & SR_KSU) || (SR & (SR_EXL | SR_ERL)) || cp0_64())
+			cpu_sdl(op);
+		else {
+			cpu_exception(EXCEPTION_RI);
+			m_branch_state = NONE;
+			// zero register zero
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+		INC_PC
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SDR: // SDR
+		if (!(SR & SR_KSU) || (SR & (SR_EXL | SR_ERL)) || cp0_64())
+			cpu_sdr(op);
+		else {
+			cpu_exception(EXCEPTION_RI);
+			m_branch_state = NONE;
+			// zero register zero
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+		}
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SWR: // SWR
+		cpu_swr(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_CACHE: // CACHE
+		if ((SR & SR_KSU) && !(SR & SR_CU0) && !(SR & (SR_EXL | SR_ERL)))
+		{
+			cpu_exception(EXCEPTION_CP0);
+			m_branch_state = NONE;
+			// zero register zero
+			m_r[0] = 0;
+			FETCH_INSTRUCT;
+			CHECK_BUSERROR;
+			//Check interrupts before trying to execute instruction
+			CHECK_INTERRUPTS;
+			DISPATCH;
+			//break;
+		}
+
+		switch ((op >> 16) & 0x1f)
+		{
+		case 0x00: // index invalidate (I)
+			if (ICACHE)
+			{
+				m_icache_tag[(ADDR(m_r[RSREG], s16(op)) & m_icache_mask_hi) >> m_icache_shift] &= ~ICACHE_V;
+				break;
+			}
+			[[fallthrough]];
+		case 0x04: // index load tag (I)
+			if (ICACHE)
+			{
+				u32 const tag = m_icache_tag[(ADDR(m_r[RSREG], s16(op)) & m_icache_mask_hi) >> m_icache_shift];
+
+				m_cp0[CP0_TagLo] = ((tag & ICACHE_PTAG) << 8) | ((tag & ICACHE_V) >> 18) | ((tag & ICACHE_P) >> 25);
+				m_cp0[CP0_ECC] = 0; // data ecc or parity
+
+				break;
+			}
+			[[fallthrough]];
+		case 0x08: // index store tag (I)
+			if (ICACHE)
+			{
+				// FIXME: compute parity
+				m_icache_tag[(ADDR(m_r[RSREG], s16(op)) & m_icache_mask_hi) >> m_icache_shift] =
+					(m_cp0[CP0_TagLo] & TAGLO_PTAGLO) >> 8 | (m_cp0[CP0_TagLo] & TAGLO_PSTATE) << 18;
+
+				break;
+			}
+			[[fallthrough]];
+		case 0x01: // index writeback invalidate (D)
+		case 0x02: // index invalidate (SI)
+		case 0x03: // index writeback invalidate (SD)
+
+		case 0x05: // index load tag (D)
+		case 0x06: // index load tag (SI)
+		case 0x07: // index load tag (SI)
+
+		case 0x09: // index store tag (D)
+		case 0x0a: // index store tag (SI)
+		case 0x0b: // index store tag (SD)
+
+		case 0x0d: // create dirty exclusive (D)
+		case 0x0f: // create dirty exclusive (SD)
+
+		case 0x10: // hit invalidate (I)
+		case 0x11: // hit invalidate (D)
+		case 0x12: // hit invalidate (SI)
+		case 0x13: // hit invalidate (SD)
+
+		case 0x14: // fill (I)
+		case 0x15: // hit writeback invalidate (D)
+		case 0x17: // hit writeback invalidate (SD)
+
+		case 0x18: // hit writeback (I)
+		case 0x19: // hit writeback (D)
+		case 0x1b: // hit writeback (SD)
+
+		case 0x1e: // hit set virtual (SI)
+		case 0x1f: // hit set virtual (SD)
+			//LOGMASKED(LOG_CACHE, "cache 0x%08x unimplemented (%s)\n", op, machine().describe_context());
+			break;
+		}
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LL: // LL
+		load_linked<u32>(ADDR(m_r[RSREG], s16(op)),
+			[this, op](u64 address, s32 data)
+			{
+				m_r[RTREG] = s64(data);
+				m_cp0[CP0_LLAddr] = u32(address >> 4);
+				m_ll_active = true;
+			});
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LWC1: // LWC1
+		cp1_execute(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LWC2: // LWC2
+		cp2_execute(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LLD: // LLD
+		load_linked<u64>(ADDR(m_r[RSREG], s16(op)),
+			[this, op](u64 address, u64 data)
+			{
+				m_r[RTREG] = data;
+				m_cp0[CP0_LLAddr] = u32(address >> 4);
+				m_ll_active = true;
+			});
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LDC1: // LDC1
+		cp1_execute(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LDC2: // LDC2
+		cp2_execute(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_LD: // LD
+		load<u64>(ADDR(m_r[RSREG], s16(op)),
+			[this, op](u64 data)
+			{
+				m_r[RTREG] = data;
+			});
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SC: // SC
+		if (m_ll_active)
+		{
+			if (store<u32>(ADDR(m_r[RSREG], s16(op)), u32(m_r[RTREG])))
+				m_r[RTREG] = 1;
+			else
+				m_r[RTREG] = 0;
+
+			m_ll_active = false;
+		}
+		else
+			m_r[RTREG] = 0;
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SWC1: // SWC1
+		cp1_execute(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SWC2: // SWC2
+		cp2_execute(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	//case 0x3b: // *
+	OPCODE_SCD: // SCD
+		if (m_ll_active)
+		{
+			if (store<u64>(ADDR(m_r[RSREG], s16(op)), m_r[RTREG]))
+				m_r[RTREG] = 1;
+			else
+				m_r[RTREG] = 0;
+
+			m_ll_active = false;
+		}
+		else
+			m_r[RTREG] = 0;
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SDC1: // SDC1
+		cp1_execute(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SDC2: // SDC2
+		cp2_execute(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_SD: // SD
+		store<u64>(ADDR(m_r[RSREG], s16(op)), m_r[RTREG]);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;
+	OPCODE_RESERVED:
+		// * Operation codes marked with an asterisk cause reserved instruction
+		// exceptions in all current implementations and are reserved for future
+		// versions of the architecture.
+		handle_reserved_instruction(op);
+		INC_PC;
+		FETCH_INSTRUCT;
+		CHECK_BUSERROR;
+		//Check interrupts before trying to execute instruction
+		CHECK_INTERRUPTS;
+		DISPATCH;	
 }
 
 void r4000_base_device::execute_set_input(int inputnum, int state)
